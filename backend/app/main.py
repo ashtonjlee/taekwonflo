@@ -8,8 +8,10 @@ from fastapi import HTTPException
 from fastapi import Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from .brackets import build_division_detail
 from .data_generator import generate_tournament
-from .models import RescheduleDemoResponse, SnapshotResponse, SnapshotValidationResponse
+from .local_repair import RepairRequest, try_repair_next_match
+from .models import DivisionDetail, RepairDemoResponse, RescheduleDemoResponse, SnapshotResponse, SnapshotValidationResponse
 from .notifications import build_mock_notifications
 from .rescheduler import EmergencyConfig, RescheduleError, reoptimize_future_events
 from .scheduler import ScheduleError, build_optimized_schedule
@@ -247,6 +249,79 @@ def validate_mock_snapshot(
     except ScheduleError as error:
         return SnapshotValidationResponse(valid=False, errors=[str(error)], warnings=[])
     return validate_snapshot(tournament=tournament, schedule=schedule)
+
+
+@app.get("/api/divisions/{division_id}/detail", response_model=DivisionDetail)
+def get_division_detail(
+    division_id: str,
+    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 3,
+    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 48,
+    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 8,
+    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 4,
+    seed: int = 42,
+    current_minute: Annotated[int, Query(ge=0)] = 60,
+) -> DivisionDetail:
+    tournament = generate_tournament(
+        number_of_rings=number_of_rings,
+        number_of_athletes=number_of_athletes,
+        number_of_teams=number_of_teams,
+        number_of_referee_crews=number_of_referee_crews,
+        seed=seed,
+    )
+    try:
+        schedule = build_optimized_schedule(tournament)
+        return build_division_detail(
+            tournament=tournament,
+            schedule=schedule,
+            division_id=division_id,
+            current_minute=current_minute,
+        )
+    except ScheduleError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=f"Division detail not found for '{division_id}'.") from error
+
+
+@app.get("/api/repair/demo", response_model=RepairDemoResponse)
+def repair_demo(
+    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 3,
+    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 48,
+    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 8,
+    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 4,
+    seed: int = 42,
+    emergency_type: Literal["medical_delay", "ring_pause", "referee_shortage", "coach_conflict", "athlete_conflict"] = "coach_conflict",
+    current_minute: Annotated[int, Query(ge=0)] = 60,
+    coach_id: str | None = None,
+    athlete_id: str | None = None,
+    referee_crew_id: str | None = None,
+    ring_id: str | None = None,
+    delay_minutes: Annotated[int, Query(ge=1)] = 20,
+) -> RepairDemoResponse:
+    tournament = generate_tournament(
+        number_of_rings=number_of_rings,
+        number_of_athletes=number_of_athletes,
+        number_of_teams=number_of_teams,
+        number_of_referee_crews=number_of_referee_crews,
+        seed=seed,
+    )
+    try:
+        original_schedule = build_optimized_schedule(tournament)
+    except ScheduleError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    return try_repair_next_match(
+        tournament=tournament,
+        original_schedule=original_schedule,
+        request=RepairRequest(
+            emergency_type=emergency_type,
+            current_minute=current_minute,
+            coach_id=coach_id,
+            athlete_id=athlete_id,
+            referee_crew_id=referee_crew_id,
+            ring_id=ring_id,
+            delay_minutes=delay_minutes,
+        ),
+    )
 
 
 @app.get("/api/reschedule/demo", response_model=RescheduleDemoResponse)

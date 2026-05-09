@@ -24,6 +24,7 @@ export default function ScheduleDashboard({
   changedEvents = [],
   validation = null,
   emergencySummary = null,
+  onSelectDivision,
 }) {
   const changedEventMap = Object.fromEntries(changedEvents.map((event) => [event.event_id, event]))
   const beforeMakespan = getMakespan(originalSchedule)
@@ -197,6 +198,7 @@ export default function ScheduleDashboard({
             changedEventMap={changedEventMap}
             currentMinute={currentMinute}
             emergencySummary={emergencySummary}
+            onSelectDivision={onSelectDivision}
           />
         ))}
       </div>

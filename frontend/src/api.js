@@ -48,3 +48,11 @@ export async function getValidationSnapshot(params = {}) {
 export async function getRescheduleDemo(params = {}) {
   return getJson(`/api/reschedule/demo${toQueryString(params)}`)
 }
+
+export async function getDivisionDetail(divisionId, params = {}) {
+  return getJson(`/api/divisions/${divisionId}/detail${toQueryString(params)}`)
+}
+
+export async function getRepairDemo(params = {}) {
+  return getJson(`/api/repair/demo${toQueryString(params)}`)
+}

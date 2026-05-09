@@ -16,6 +16,7 @@ export default function RingColumn({
   changedEventMap = {},
   currentMinute = 60,
   emergencySummary = null,
+  onSelectDivision,
   tournamentStartTime = '09:00',
 }) {
   const sortedEvents = [...events].sort((first, second) => (first.start_minute ?? 0) - (second.start_minute ?? 0))
@@ -92,6 +93,7 @@ export default function RingColumn({
               changeInfo={changedEventMap[event.event_id]}
               currentMinute={currentMinute}
               isPaused={isPaused && event.end_minute > currentMinute}
+              onSelectDivision={onSelectDivision}
               tournamentStartTime={tournamentStartTime}
             />
           ))

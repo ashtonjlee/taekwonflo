@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { getHealth, getMockTournamentSnapshot, getRescheduleDemo, getValidationSnapshot } from './api'
+import { getDivisionDetail, getHealth, getMockTournamentSnapshot, getRescheduleDemo, getValidationSnapshot } from './api'
 import TournamentSetup from './components/TournamentSetup'
 import ScheduleDashboard from './components/ScheduleDashboard'
 import EmergencyControls from './components/EmergencyControls'
 import NotificationsPanel from './components/NotificationsPanel'
+import DivisionDetailPanel from './components/DivisionDetailPanel'
 
 function App() {
   const [health, setHealth] = useState({ status: 'loading' })
@@ -14,6 +15,9 @@ function App() {
   const [notifications, setNotifications] = useState([])
   const [validation, setValidation] = useState(null)
   const [emergencySummary, setEmergencySummary] = useState(null)
+  const [divisionDetail, setDivisionDetail] = useState(null)
+  const [divisionDetailLoading, setDivisionDetailLoading] = useState(false)
+  const [divisionDetailError, setDivisionDetailError] = useState(null)
   const [loadingEmergency, setLoadingEmergency] = useState(false)
   const [error, setError] = useState(null)
 
@@ -45,6 +49,28 @@ function App() {
     } finally {
       setLoadingEmergency(false)
     }
+  }
+
+  async function handleSelectDivision(event) {
+    try {
+      setDivisionDetailLoading(true)
+      setDivisionDetailError(null)
+      setDivisionDetail(null)
+      const detail = await getDivisionDetail(event.division_id, {
+        current_minute: emergencySummary?.current_minute ?? 60,
+      })
+      setDivisionDetail(detail)
+    } catch (detailError) {
+      setDivisionDetailError(detailError.message)
+    } finally {
+      setDivisionDetailLoading(false)
+    }
+  }
+
+  function handleCloseDivisionDetail() {
+    setDivisionDetail(null)
+    setDivisionDetailError(null)
+    setDivisionDetailLoading(false)
   }
 
   useEffect(() => {
@@ -108,6 +134,7 @@ function App() {
           changedEvents={changedEvents}
           validation={validation}
           emergencySummary={emergencySummary}
+          onSelectDivision={handleSelectDivision}
         />
         <EmergencyControls
           tournament={tournament}
@@ -117,6 +144,12 @@ function App() {
         />
         <NotificationsPanel notifications={notifications} />
       </div>
+      <DivisionDetailPanel
+        detail={divisionDetail}
+        loading={divisionDetailLoading}
+        error={divisionDetailError}
+        onClose={handleCloseDivisionDetail}
+      />
     </div>
   )
 }

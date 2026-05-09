@@ -219,6 +219,7 @@ def _build_schedule_response(
             athlete_ids=event.athlete_ids,
             team_ids=event.team_ids,
             required_coach_ids=event.required_coach_ids,
+            required_referee_count=event.required_referee_count,
             status="scheduled",
         )
         events_by_ring[ring.id].append(scheduled)

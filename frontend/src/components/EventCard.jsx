@@ -5,6 +5,7 @@ export default function EventCard({
   changeInfo,
   currentMinute = 60,
   isPaused = false,
+  onSelectDivision,
   tournamentStartTime = '09:00',
 }) {
   const divisionName = event.division_name || event.division || 'Unknown division'
@@ -54,10 +55,12 @@ export default function EventCard({
   }
 
   return (
-    <article
+    <button
+      type="button"
+      onClick={() => onSelectDivision?.(event)}
       className={`rounded-md border p-3 text-xs transition-all duration-300 ${
         hasChanges ? 'border-amber-300 bg-amber-50 shadow-sm shadow-amber-100' : 'border-slate-200 bg-slate-50'
-      }`}
+      } w-full text-left hover:border-blue-300 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500`}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
@@ -89,6 +92,6 @@ export default function EventCard({
           ))}
         </div>
       ) : null}
-    </article>
+    </button>
   )
 }
