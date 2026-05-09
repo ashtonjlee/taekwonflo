@@ -1,50 +1,54 @@
-import { formatDuration, formatMinuteRange } from '../utils/timeline'
+import { formatDuration, formatMinuteRange, formatTournamentMinute, getEventStatus } from '../utils/timeline'
 
-export default function EventCard({ event, changeInfo, currentMinute = 60, tournamentStartTime = '09:00' }) {
+export default function EventCard({
+  event,
+  changeInfo,
+  currentMinute = 60,
+  isPaused = false,
+  tournamentStartTime = '09:00',
+}) {
   const divisionName = event.division_name || event.division || 'Unknown division'
   const timeLabel =
     event.start_time && event.end_time
       ? `${event.start_time} - ${event.end_time}`
       : formatMinuteRange(event.start_minute, event.end_minute, tournamentStartTime)
-  const minuteLabel = `T+${event.start_minute} - T+${event.end_minute}`
+  const minuteLabel = `${formatTournamentMinute(event.start_minute)} - ${formatTournamentMinute(event.end_minute)}`
   const hasChanges = Boolean(changeInfo)
-  const isCompleted = event.end_minute <= currentMinute
-  const isInProgress = event.start_minute <= currentMinute && currentMinute < event.end_minute
-  const isRescheduled = Boolean(changeInfo)
-  const isDelayed = changeInfo && changeInfo.new_start_minute > changeInfo.original_start_minute
-
-  let statusLabel = 'upcoming'
-  let statusClass = 'bg-slate-100 text-slate-700 ring-1 ring-slate-200'
-  let dotClass = 'bg-slate-400'
-  if (isCompleted) {
-    statusLabel = 'completed'
-    statusClass = 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-200'
-    dotClass = 'bg-emerald-500'
-  } else if (isInProgress) {
-    statusLabel = 'live'
-    statusClass = 'bg-blue-100 text-blue-800 ring-1 ring-blue-200'
-    dotClass = 'bg-blue-500'
-  } else if (isDelayed) {
-    statusLabel = 'delayed'
-    statusClass = 'bg-rose-100 text-rose-800 ring-1 ring-rose-200'
-    dotClass = 'bg-rose-500'
-  } else if (isRescheduled) {
-    statusLabel = 'rescheduled'
-    statusClass = 'bg-amber-100 text-amber-800 ring-1 ring-amber-200'
-    dotClass = 'bg-amber-500'
-  }
+  const statusLabel = getEventStatus(event, currentMinute, changeInfo, isPaused)
+  const statusStyle = {
+    completed: {
+      badge: 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-200',
+      dot: 'bg-emerald-500',
+    },
+    'in progress': {
+      badge: 'bg-blue-100 text-blue-800 ring-1 ring-blue-200',
+      dot: 'bg-blue-500',
+    },
+    upcoming: {
+      badge: 'bg-slate-100 text-slate-700 ring-1 ring-slate-200',
+      dot: 'bg-slate-400',
+    },
+    rescheduled: {
+      badge: 'bg-amber-100 text-amber-800 ring-1 ring-amber-200',
+      dot: 'bg-amber-500',
+    },
+    paused: {
+      badge: 'bg-purple-100 text-purple-800 ring-1 ring-purple-200',
+      dot: 'bg-purple-500',
+    },
+  }[statusLabel]
 
   const changeLines = []
   if (changeInfo) {
     if (changeInfo.original_ring_id !== changeInfo.new_ring_id) {
-      changeLines.push(`Moved: ${changeInfo.original_ring_id} → ${changeInfo.new_ring_id}`)
+      changeLines.push(`Moved: ${changeInfo.original_ring_id} -> ${changeInfo.new_ring_id}`)
     }
     if (changeInfo.original_start_minute !== changeInfo.new_start_minute) {
       changeLines.push(`Start changed: T+${changeInfo.original_start_minute} -> T+${changeInfo.new_start_minute}`)
     }
     if (changeInfo.original_referee_crew_id !== changeInfo.new_referee_crew_id) {
       changeLines.push(
-        `Referee changed: ${changeInfo.original_referee_crew_id} → ${changeInfo.new_referee_crew_id}`,
+        `Referee changed: ${changeInfo.original_referee_crew_id} -> ${changeInfo.new_referee_crew_id}`,
       )
     }
   }
@@ -58,14 +62,14 @@ export default function EventCard({ event, changeInfo, currentMinute = 60, tourn
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${dotClass}`} />
+            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${statusStyle.dot}`} />
             <div className="truncate font-semibold text-slate-900">{divisionName}</div>
           </div>
           <div className="mt-1 text-[11px] font-medium text-slate-500">
             {formatDuration(event.start_minute, event.end_minute)}
           </div>
         </div>
-        <span className={`rounded px-2 py-0.5 text-[10px] uppercase tracking-wide ${statusClass}`}>
+        <span className={`rounded px-2 py-0.5 text-[10px] uppercase tracking-wide ${statusStyle.badge}`}>
           {statusLabel}
         </span>
       </div>

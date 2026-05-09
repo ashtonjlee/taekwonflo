@@ -1,24 +1,21 @@
 import RingColumn from './RingColumn'
-import { formatDuration, formatMinuteAsClock, formatMinuteRange } from '../utils/timeline'
+import {
+  formatDuration,
+  formatMinuteAsClock,
+  formatMinuteRange,
+  formatTournamentMinute,
+  getMakespan,
+  getScheduleEvents,
+  getStagingGroups,
+  isEventInProgress,
+} from '../utils/timeline'
 
-function getMakespan(schedule = []) {
-  const allEvents = schedule.flatMap((ring) => ring.events || [])
-  if (allEvents.length === 0) {
-    return 0
+function isAffectedRing(emergencySummary, ring) {
+  const affected = emergencySummary?.affectedResource
+  if (!affected) {
+    return false
   }
-  return Math.max(...allEvents.map((event) => event.end_minute ?? 0))
-}
-
-function getAllEvents(schedule = []) {
-  return schedule
-    .flatMap((ring) =>
-      (ring.events || []).map((event) => ({
-        ...event,
-        ring_id: event.ring_id || ring.ring_id,
-        ring_name: event.ring_name || ring.ring_name,
-      })),
-    )
-    .sort((first, second) => (first.start_minute ?? 0) - (second.start_minute ?? 0))
+  return affected === ring.ring_id || affected === ring.ring_name
 }
 
 export default function ScheduleDashboard({
@@ -34,14 +31,35 @@ export default function ScheduleDashboard({
   const affected = emergencySummary?.affectedResource || 'N/A'
   const currentMinute = emergencySummary?.current_minute ?? 60
   const emergencyDuration = emergencySummary?.duration_minutes
-  const allEvents = getAllEvents(currentSchedule)
-  const activeEvents = allEvents.filter(
-    (event) => event.start_minute <= currentMinute && currentMinute < event.end_minute,
-  )
-  const stagingQueue = allEvents
-    .filter((event) => event.start_minute >= currentMinute)
-    .slice(0, 6)
+  const allEvents = getScheduleEvents(currentSchedule)
+  const activeEvents = allEvents.filter((event) => isEventInProgress(event, currentMinute))
   const delayedEvents = changedEvents.filter((event) => event.new_start_minute > event.original_start_minute)
+  const activeRingCount = currentSchedule.filter((ring) =>
+    (ring.events || []).some((event) => isEventInProgress(event, currentMinute)),
+  ).length
+  const pausedRingCount = ['medical_delay', 'ring_pause'].includes(emergencySummary?.emergency_type)
+    ? currentSchedule.filter((ring) => isAffectedRing(emergencySummary, ring)).length
+    : 0
+  const delayedRingCount = currentSchedule.filter((ring) =>
+    (ring.events || []).some((event) => {
+      const changeInfo = changedEventMap[event.event_id]
+      return changeInfo && changeInfo.new_start_minute > changeInfo.original_start_minute
+    }),
+  ).length
+  const delayedOrPausedRings = new Set()
+  currentSchedule.forEach((ring) => {
+    const hasDelayedEvent = (ring.events || []).some((event) => {
+      const changeInfo = changedEventMap[event.event_id]
+      return changeInfo && changeInfo.new_start_minute > changeInfo.original_start_minute
+    })
+    if (hasDelayedEvent || (pausedRingCount > 0 && isAffectedRing(emergencySummary, ring))) {
+      delayedOrPausedRings.add(ring.ring_id)
+    }
+  })
+  const remainingEvents = allEvents.filter((event) => event.end_minute > currentMinute).length
+  const completedEvents = allEvents.length - remainingEvents
+  const stagingGroups = getStagingGroups(allEvents, currentMinute)
+  const stagingCount = stagingGroups.reduce((total, group) => total + group.events.length, 0)
   const makespanDelta = afterMakespan - beforeMakespan
   const validationPassed = validation?.valid !== false
   const emergencyLabel = emergencySummary?.emergency_type || 'none'
@@ -56,14 +74,17 @@ export default function ScheduleDashboard({
             Monitor ring status, staging calls, and the impact of emergency re-optimization.
           </p>
         </div>
-        <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4 lg:min-w-[520px]">
-          <SummaryTile label="Now" value={formatMinuteAsClock(currentMinute)} tone="blue" />
-          <SummaryTile label="Active" value={activeEvents.length} tone="emerald" />
+        <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3 xl:min-w-[720px] xl:grid-cols-6">
+          <SummaryTile label="Current minute" value={formatTournamentMinute(currentMinute)} detail={formatMinuteAsClock(currentMinute)} tone="blue" />
+          <SummaryTile label="Completion time" value={formatMinuteAsClock(afterMakespan)} detail={formatDuration(0, afterMakespan)} />
+          <SummaryTile label="Active rings" value={activeRingCount} detail={`${activeEvents.length} events`} tone="emerald" />
           <SummaryTile
-            label="Changed"
-            value={changedEvents.length}
-            tone={changedEvents.length > 0 ? 'amber' : 'slate'}
+            label="Delayed/paused"
+            value={delayedOrPausedRings.size}
+            detail={`${delayedRingCount} delayed, ${pausedRingCount} paused`}
+            tone={delayedOrPausedRings.size > 0 ? 'amber' : 'slate'}
           />
+          <SummaryTile label="Remaining events" value={remainingEvents} detail={`${completedEvents} completed`} />
           <SummaryTile
             label="Validation"
             value={validationPassed ? 'Passed' : 'Failed'}
@@ -87,9 +108,15 @@ export default function ScheduleDashboard({
               {emergencyLabel}
             </span>
           </div>
-          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-5">
             <Metric
-              label="Finish time"
+              label="Current minute"
+              value={formatTournamentMinute(currentMinute)}
+              detail={formatMinuteAsClock(currentMinute)}
+              tone="blue"
+            />
+            <Metric
+              label="Completion time"
               value={formatMinuteAsClock(afterMakespan)}
               detail={`${formatDuration(0, afterMakespan)} total`}
             />
@@ -100,10 +127,15 @@ export default function ScheduleDashboard({
               tone={makespanDelta > 0 ? 'rose' : 'emerald'}
             />
             <Metric
-              label="Delayed events"
-              value={delayedEvents.length}
-              detail={`${changedEvents.length} total changes`}
-              tone={delayedEvents.length > 0 ? 'amber' : 'slate'}
+              label="Remaining events"
+              value={remainingEvents}
+              detail={`${completedEvents} completed of ${allEvents.length}`}
+            />
+            <Metric
+              label="Schedule changes"
+              value={changedEvents.length}
+              detail={`${delayedEvents.length} delayed events`}
+              tone={changedEvents.length > 0 ? 'amber' : 'slate'}
             />
           </div>
           <div className="mt-4 rounded-md border border-slate-200 bg-white p-3">
@@ -113,10 +145,10 @@ export default function ScheduleDashboard({
                 Affected: <span className="font-medium text-slate-950">{affected}</span>
               </div>
               <div>
-                Current minute: <span className="font-medium text-slate-950">T+{currentMinute}</span>
+                Active rings: <span className="font-medium text-slate-950">{activeRingCount}</span>
               </div>
               <div>
-                Active events frozen: <span className="font-medium text-slate-950">{activeEvents.length}</span>
+                Delayed/paused rings: <span className="font-medium text-slate-950">{delayedOrPausedRings.size}</span>
               </div>
               <div>
                 Duration:{' '}
@@ -137,34 +169,19 @@ export default function ScheduleDashboard({
           <div className="flex items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-blue-950">Staging Queue</div>
-              <div className="mt-1 text-xs text-blue-800">Next calls after {formatMinuteAsClock(currentMinute)}.</div>
+              <div className="mt-1 text-xs text-blue-800">Live calls after {formatMinuteAsClock(currentMinute)}.</div>
             </div>
             <span className="rounded bg-white px-2 py-1 text-xs font-semibold text-blue-800">
-              {stagingQueue.length} ready
+              {stagingCount} queued
             </span>
           </div>
-          <div className="mt-3 space-y-2">
-            {stagingQueue.length === 0 ? (
+          <div className="mt-3 grid grid-cols-1 gap-3">
+            {stagingCount === 0 ? (
               <p className="rounded border border-blue-100 bg-white p-3 text-sm text-blue-800">
                 No upcoming events in the staging window.
               </p>
             ) : (
-              stagingQueue.map((event, index) => (
-                <div
-                  key={`${event.event_id || event.id}-${index}`}
-                  className="grid grid-cols-[3rem_1fr] gap-3 rounded-md border border-blue-100 bg-white p-3 text-sm"
-                >
-                  <div className="text-xs font-semibold uppercase text-blue-700">#{index + 1}</div>
-                  <div>
-                    <div className="font-semibold text-slate-900">
-                      {event.division_name || event.division || 'Unknown division'}
-                    </div>
-                    <div className="mt-1 text-xs text-slate-600">
-                      {formatMinuteRange(event.start_minute, event.end_minute)} - {event.ring_name || event.ring_id}
-                    </div>
-                  </div>
-                </div>
-              ))
+              stagingGroups.map((group) => <StagingLane key={group.id} group={group} currentMinute={currentMinute} />)
             )}
           </div>
         </div>
@@ -187,7 +204,7 @@ export default function ScheduleDashboard({
   )
 }
 
-function SummaryTile({ label, value, tone = 'slate' }) {
+function SummaryTile({ label, value, detail = null, tone = 'slate' }) {
   const toneClass = {
     amber: 'border-amber-200 bg-amber-50 text-amber-950',
     blue: 'border-blue-200 bg-blue-50 text-blue-950',
@@ -200,6 +217,7 @@ function SummaryTile({ label, value, tone = 'slate' }) {
     <div className={`rounded-lg border p-3 ${toneClass}`}>
       <div className="text-[11px] font-semibold uppercase tracking-wide opacity-70">{label}</div>
       <div className="mt-1 text-lg font-bold">{value}</div>
+      {detail ? <div className="mt-0.5 text-[11px] font-medium opacity-75">{detail}</div> : null}
     </div>
   )
 }
@@ -207,6 +225,7 @@ function SummaryTile({ label, value, tone = 'slate' }) {
 function Metric({ label, value, detail, tone = 'slate' }) {
   const valueClass = {
     amber: 'text-amber-800',
+    blue: 'text-blue-800',
     emerald: 'text-emerald-800',
     rose: 'text-rose-800',
     slate: 'text-slate-950',
@@ -217,6 +236,44 @@ function Metric({ label, value, detail, tone = 'slate' }) {
       <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
       <div className={`mt-1 text-xl font-bold ${valueClass}`}>{value}</div>
       <div className="mt-1 text-xs text-slate-500">{detail}</div>
+    </div>
+  )
+}
+
+function StagingLane({ group, currentMinute }) {
+  return (
+    <div className="rounded-md border border-blue-100 bg-white p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs font-semibold uppercase tracking-wide text-blue-800">{group.label}</div>
+        <div className="text-xs font-semibold text-slate-500">{group.events.length}</div>
+      </div>
+      <div className="mt-2 space-y-2">
+        {group.events.length === 0 ? (
+          <div className="rounded border border-slate-100 bg-slate-50 p-2 text-xs text-slate-500">No calls</div>
+        ) : (
+          group.events.map((event, index) => {
+            const minutesUntilStart = event.start_minute - currentMinute
+            return (
+              <div
+                key={`${group.id}-${event.event_id || event.id}-${index}`}
+                className="grid grid-cols-[4.25rem_1fr] gap-3 rounded border border-slate-100 bg-slate-50 p-2 text-sm"
+              >
+                <div className="text-xs font-semibold text-blue-700">
+                  {minutesUntilStart === 0 ? 'now' : `${minutesUntilStart} min`}
+                </div>
+                <div className="min-w-0">
+                  <div className="truncate font-semibold text-slate-900">
+                    {event.division_name || event.division || 'Unknown division'}
+                  </div>
+                  <div className="mt-0.5 text-xs text-slate-600">
+                    {formatMinuteRange(event.start_minute, event.end_minute)} - {event.ring_name || event.ring_id}
+                  </div>
+                </div>
+              </div>
+            )
+          })
+        )}
+      </div>
     </div>
   )
 }
