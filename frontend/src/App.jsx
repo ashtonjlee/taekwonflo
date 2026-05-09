@@ -38,6 +38,7 @@ function App() {
           changedEvent?.new_referee_crew_id ||
           'auto-selected impactful event',
         current_minute: formValues.current_minute,
+        duration_minutes: formValues.delay_minutes,
       })
     } catch (simulationError) {
       setError(simulationError.message)

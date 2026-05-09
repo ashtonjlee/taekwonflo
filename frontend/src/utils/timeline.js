@@ -7,3 +7,12 @@ export function formatMinuteAsClock(minuteOffset, tournamentStart = '09:00') {
   const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12
   return `${hour12}:${String(minute).padStart(2, '0')} ${period}`
 }
+
+export function formatMinuteRange(startMinute, endMinute, tournamentStart = '09:00') {
+  return `${formatMinuteAsClock(startMinute, tournamentStart)} - ${formatMinuteAsClock(endMinute, tournamentStart)}`
+}
+
+export function formatDuration(startMinute, endMinute) {
+  const duration = Math.max(0, Number(endMinute) - Number(startMinute))
+  return `${duration} min`
+}
