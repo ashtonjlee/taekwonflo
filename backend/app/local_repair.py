@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .availability import AvailabilityIndex, build_availability_index, coach_ids_for_match, resource_requirements_for_match
-from .brackets import build_division_detail
+from .brackets import athlete_ids_involved, build_division_detail
 from .models import (
     ChangedEvent,
     ChangedMatch,
@@ -19,6 +19,12 @@ from .models import (
 )
 from .notifications import build_mock_notifications
 from .rescheduler import EmergencyConfig, reoptimize_future_events
+from .schedule_ops import (
+    assign_referees_to_schedule,
+    build_coordination_board,
+    diff_referee_assignments,
+    enrich_schedule_changes,
+)
 from .validation import validate_snapshot
 
 RepairEmergencyType = Literal["medical_delay", "ring_pause", "referee_shortage", "coach_conflict", "athlete_conflict"]
@@ -80,6 +86,8 @@ def try_repair_next_match(
                 notifications=_repair_notifications(affected_match, replacement, "same division match swap"),
                 validation=validate_snapshot(tournament=tournament, schedule=original_schedule),
                 division_detail=repaired_detail,
+                operational_minute=request.current_minute,
+                summary_reason=_reason_for_request(request),
             )
 
         ring_replacement = _find_same_ring_replacement(
@@ -121,6 +129,8 @@ def try_repair_next_match(
                 notifications=_repair_notifications(affected_match, replacement_match, "same ring match swap"),
                 validation=validate_snapshot(tournament=tournament, schedule=repaired_schedule),
                 division_detail=affected_detail,
+                operational_minute=request.current_minute,
+                summary_reason=_reason_for_request(request),
             )
 
     if request.emergency_type in {"medical_delay", "ring_pause"} and affected_event:
@@ -149,6 +159,8 @@ def try_repair_next_match(
             ],
             validation=validate_snapshot(tournament=tournament, schedule=repaired_schedule),
             division_detail=affected_detail,
+            operational_minute=request.current_minute,
+            summary_reason=_reason_for_request(request),
         )
 
     try:
@@ -187,6 +199,8 @@ def try_repair_next_match(
         notifications=build_mock_notifications(repaired_schedule),
         validation=validate_snapshot(tournament=tournament, schedule=repaired_schedule),
         division_detail=affected_detail,
+        operational_minute=request.current_minute,
+        summary_reason=_reason_for_request(request),
     )
 
 
@@ -224,9 +238,7 @@ def _find_affected_match(detail: DivisionDetail | None, request: RepairRequest) 
         and (match.status in {"in_progress", "staging"} or match.start_minute >= request.current_minute)
     ]
     for match in candidates:
-        competitor_ids = {match.competitor_1.competitor_id}
-        if match.competitor_2:
-            competitor_ids.add(match.competitor_2.competitor_id)
+        competitor_ids = set(athlete_ids_involved(match))
         if request.athlete_id and request.athlete_id not in competitor_ids:
             continue
         return match
@@ -252,7 +264,7 @@ def _find_same_division_replacement(
         match_coach_ids = coach_ids_for_match(tournament, match)
         if _match_uses_blocked_resource(match, match_coach_ids, event.referee_crew_id, request):
             continue
-        requirements = resource_requirements_for_match(match, match_coach_ids, event.referee_crew_id)
+        requirements = resource_requirements_for_match(match, match_coach_ids, event.referee_crew_id, event.assigned_referee_ids)
         if _available_for_current_slot(availability, requirements, affected_match):
             return match
     return None
@@ -290,7 +302,7 @@ def _find_same_ring_replacement(
             match_coach_ids = coach_ids_for_match(tournament, match)
             if _match_uses_blocked_resource(match, match_coach_ids, event.referee_crew_id, request):
                 continue
-            requirements = resource_requirements_for_match(match, match_coach_ids, event.referee_crew_id)
+            requirements = resource_requirements_for_match(match, match_coach_ids, event.referee_crew_id, event.assigned_referee_ids)
             if _available_for_current_slot(availability, requirements, affected_match):
                 return event, match
     return None
@@ -325,9 +337,7 @@ def _match_uses_blocked_resource(
     referee_crew_id: str,
     request: RepairRequest,
 ) -> bool:
-    competitor_ids = {match.competitor_1.competitor_id}
-    if match.competitor_2:
-        competitor_ids.add(match.competitor_2.competitor_id)
+    competitor_ids = set(athlete_ids_involved(match))
     return bool(
         (request.athlete_id and request.athlete_id in competitor_ids)
         or (request.coach_id and request.coach_id in coach_ids)
@@ -532,11 +542,34 @@ def _response(
     notifications: list[NotificationMessage],
     validation,
     division_detail: DivisionDetail | None,
+    operational_minute: int = 60,
+    summary_reason: str = "match repair adjustment",
 ) -> RepairDemoResponse:
-    del tournament
+    baseline_schedule = assign_referees_to_schedule(tournament, original_schedule) if tournament.referees else original_schedule
+    hydrated_repair = assign_referees_to_schedule(tournament, repaired_schedule) if tournament.referees else repaired_schedule
+    referee_moves = (
+        diff_referee_assignments(
+            tournament,
+            baseline_schedule,
+            hydrated_repair,
+            reason=summary_reason,
+        )
+        if tournament.referees
+        else []
+    )
+
+    enriched = enrich_schedule_changes(
+        tournament,
+        prior_schedule=baseline_schedule,
+        next_schedule=hydrated_repair,
+        changed_events=changed_events,
+        reason=summary_reason or strategy.replace("_", " "),
+    )
+    coordinator = build_coordination_board(tournament, hydrated_repair, operational_minute)
+
     return RepairDemoResponse(
-        original_schedule=original_schedule,
-        repaired_schedule=repaired_schedule,
+        original_schedule=baseline_schedule,
+        repaired_schedule=hydrated_repair,
         repair_strategy_used=strategy,
         affected_match=affected_match,
         replacement_match=replacement_match,
@@ -546,4 +579,7 @@ def _response(
         notifications=notifications,
         validation=validation,
         division_detail=division_detail,
+        schedule_changes=enriched,
+        referee_adjustments=referee_moves,
+        coordination_board=coordinator,
     )

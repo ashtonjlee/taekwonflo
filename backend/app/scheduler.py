@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from ortools.sat.python import cp_model
 
 from .models import RingSchedule, ScheduledEvent, Tournament
+from .schedule_ops import assign_referees_to_schedule
 
 
 class ScheduleError(RuntimeError):
@@ -228,4 +229,6 @@ def _build_schedule_response(
     for ring in tournament.rings:
         ring_events = sorted(events_by_ring[ring.id], key=lambda item: item.start_minute)
         schedules.append(RingSchedule(ring_id=ring.id, ring_name=ring.name, events=ring_events))
+    if tournament.referees:
+        schedules = assign_referees_to_schedule(tournament, schedules)
     return schedules

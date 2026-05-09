@@ -2,7 +2,7 @@
 
 ## Current Scope
 
-TaekwonFlo schedules division-level tournament events and now exposes deterministic match/bracket detail inside each scheduled division. The optimizer still assigns one scheduled event per division; match-level timing is derived from that scheduled event for live operations views.
+TaekwonFlo schedules division-level tournament events and now exposes deterministic match/bracket detail inside each scheduled division. The optimizer still assigns one scheduled event per division; match-level timing is derived from that scheduled event for live operations views. The default demo simulates a large 5-ring, roughly 61-division WT/USAT-inspired tournament day.
 
 ## Hard Constraints
 
@@ -41,6 +41,29 @@ Referee shortage behavior:
 - Poomsae preliminary-style rounds use 3 officials.
 - Poomsae semifinal/final and larger team poomsae groups use 5 officials.
 - During a shortage window, the rescheduler prefers lower-official-count work and delays higher-official-count events when needed.
+
+Greedy referee rostering runs after deterministic ring assignments: each scheduled event prefers its crew’s referees (`referee_ids`) before minimally borrowing certified individuals from other crews to satisfy `required_referee_count`. Availability tracking records each borrowed referee interval separately from coarse crew overlaps so temporary loans remain auditable, and summaries surface deltas through `RefereeAdjustment` rows whenever borrowing occurs.
+
+Kyorugi bracket exports never print athlete names ahead of known feeder outcomes; placeholders read `Winner of Match N`, keyed by feeder `match_number`, and knockout losers cannot advance downstream.
+
+## Weight Classes And Timing
+
+The synthetic generator uses simplified WT/USAT-inspired categories for demo realism. These categories are not an official rulebook. Actual official rules, recognized divisions, weigh-in procedures, and match timing should be checked against current USATKD and WT event manuals for each event.
+
+Kyorugi timing estimates:
+
+- color belt matches approximate two 60-second rounds, a 30-second rest, setup, and transition.
+- black belt and world class matches approximate three 90-second rounds, 30-second rests, setup, and transition.
+- division duration scales by bracket size and expected match count.
+
+Poomsae timing estimates:
+
+- individual preliminary rounds use about 2.5 minutes per competitor.
+- pair/team rounds use about 3.0 minutes per entry.
+- black belt/world class finals are longer because finalists may perform two poomsae/forms.
+- final rounds use about 4-5 minutes per finalist or entry plus operational buffer.
+
+These estimates intentionally include buffer because real ring throughput depends on staging, judge readiness, athlete check-in, equipment, protests, and local event procedures.
 
 ## Match Detail Status
 

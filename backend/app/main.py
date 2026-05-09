@@ -8,13 +8,16 @@ from fastapi import HTTPException
 from fastapi import Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from pydantic import BaseModel, Field
+
 from .brackets import build_division_detail
 from .data_generator import generate_tournament
 from .local_repair import RepairRequest, try_repair_next_match
-from .models import DivisionDetail, RepairDemoResponse, RescheduleDemoResponse, SnapshotResponse, SnapshotValidationResponse
+from .models import ChangedEvent, DivisionDetail, RepairDemoResponse, RescheduleDemoResponse, RingSchedule, SnapshotResponse, SnapshotValidationResponse, Tournament
 from .notifications import build_mock_notifications
 from .rescheduler import EmergencyConfig, RescheduleError, reoptimize_future_events
 from .scheduler import ScheduleError, build_optimized_schedule
+from .schedule_ops import assign_referees_to_schedule, build_coordination_board, diff_referee_assignments, enrich_schedule_changes, summarize_ring_operations
 from .validation import validate_snapshot
 
 app = FastAPI(title="TaekwonFlo API", version="0.1.0")
@@ -26,6 +29,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class LiveOperationsRequest(BaseModel):
+    tournament: Tournament
+    schedule: list[RingSchedule]
+    current_minute: int = Field(default=60, ge=0)
+    changed_events: list[ChangedEvent] = Field(default_factory=list)
+
+
+@app.post("/api/operations/live")
+def live_operations_dashboard(payload: LiveOperationsRequest) -> dict[str, object]:
+    board = build_coordination_board(payload.tournament, payload.schedule, payload.current_minute)
+    hints = {
+        ring.id: summarize_ring_operations(
+            tournament=payload.tournament,
+            ring_id=ring.id,
+            schedule=payload.schedule,
+            changed_event_rows=payload.changed_events,
+            current_minute=payload.current_minute,
+        )
+        for ring in payload.tournament.rings
+    }
+    return {"coordination_board": board.model_dump(), "ring_hints": hints}
 
 
 @app.get("/health")
@@ -185,10 +211,12 @@ def _resolve_emergency_defaults(
 
 @app.get("/api/mock/snapshot", response_model=SnapshotResponse)
 def get_mock_snapshot(
-    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 3,
-    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 48,
-    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 8,
-    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 4,
+    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 5,
+    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 360,
+    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 24,
+    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 10,
+    number_of_divisions: Annotated[int, Query(ge=1, le=200)] = 61,
+    target_tournament_minutes: Annotated[int, Query(ge=120, le=900)] = 480,
     seed: int = 42,
 ) -> SnapshotResponse:
     tournament = generate_tournament(
@@ -196,6 +224,8 @@ def get_mock_snapshot(
         number_of_athletes=number_of_athletes,
         number_of_teams=number_of_teams,
         number_of_referee_crews=number_of_referee_crews,
+        number_of_divisions=number_of_divisions,
+        target_tournament_minutes=target_tournament_minutes,
         seed=seed,
     )
     try:
@@ -208,10 +238,12 @@ def get_mock_snapshot(
 
 @app.get("/api/schedule", response_model=SnapshotResponse)
 def get_schedule(
-    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 3,
-    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 48,
-    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 8,
-    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 4,
+    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 5,
+    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 360,
+    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 24,
+    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 10,
+    number_of_divisions: Annotated[int, Query(ge=1, le=200)] = 61,
+    target_tournament_minutes: Annotated[int, Query(ge=120, le=900)] = 480,
     seed: int = 42,
 ) -> SnapshotResponse:
     tournament = generate_tournament(
@@ -219,6 +251,8 @@ def get_schedule(
         number_of_athletes=number_of_athletes,
         number_of_teams=number_of_teams,
         number_of_referee_crews=number_of_referee_crews,
+        number_of_divisions=number_of_divisions,
+        target_tournament_minutes=target_tournament_minutes,
         seed=seed,
     )
     try:
@@ -231,10 +265,12 @@ def get_schedule(
 
 @app.get("/api/validate/snapshot", response_model=SnapshotValidationResponse)
 def validate_mock_snapshot(
-    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 3,
-    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 48,
-    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 8,
-    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 4,
+    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 5,
+    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 360,
+    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 24,
+    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 10,
+    number_of_divisions: Annotated[int, Query(ge=1, le=200)] = 61,
+    target_tournament_minutes: Annotated[int, Query(ge=120, le=900)] = 480,
     seed: int = 42,
 ) -> SnapshotValidationResponse:
     tournament = generate_tournament(
@@ -242,6 +278,8 @@ def validate_mock_snapshot(
         number_of_athletes=number_of_athletes,
         number_of_teams=number_of_teams,
         number_of_referee_crews=number_of_referee_crews,
+        number_of_divisions=number_of_divisions,
+        target_tournament_minutes=target_tournament_minutes,
         seed=seed,
     )
     try:
@@ -254,18 +292,23 @@ def validate_mock_snapshot(
 @app.get("/api/divisions/{division_id}/detail", response_model=DivisionDetail)
 def get_division_detail(
     division_id: str,
-    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 3,
-    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 48,
-    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 8,
-    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 4,
+    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 5,
+    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 360,
+    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 24,
+    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 10,
+    number_of_divisions: Annotated[int, Query(ge=1, le=200)] = 61,
+    target_tournament_minutes: Annotated[int, Query(ge=120, le=900)] = 480,
     seed: int = 42,
     current_minute: Annotated[int, Query(ge=0)] = 60,
+    focus_match_id: Annotated[str | None, Query()] = None,
 ) -> DivisionDetail:
     tournament = generate_tournament(
         number_of_rings=number_of_rings,
         number_of_athletes=number_of_athletes,
         number_of_teams=number_of_teams,
         number_of_referee_crews=number_of_referee_crews,
+        number_of_divisions=number_of_divisions,
+        target_tournament_minutes=target_tournament_minutes,
         seed=seed,
     )
     try:
@@ -275,6 +318,7 @@ def get_division_detail(
             schedule=schedule,
             division_id=division_id,
             current_minute=current_minute,
+            focus_match_id=focus_match_id,
         )
     except ScheduleError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -284,13 +328,15 @@ def get_division_detail(
 
 @app.get("/api/repair/demo", response_model=RepairDemoResponse)
 def repair_demo(
-    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 3,
-    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 48,
-    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 8,
-    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 4,
+    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 5,
+    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 360,
+    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 24,
+    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 10,
+    number_of_divisions: Annotated[int, Query(ge=1, le=200)] = 61,
+    target_tournament_minutes: Annotated[int, Query(ge=120, le=900)] = 480,
     seed: int = 42,
     emergency_type: Literal["medical_delay", "ring_pause", "referee_shortage", "coach_conflict", "athlete_conflict"] = "coach_conflict",
-    current_minute: Annotated[int, Query(ge=0)] = 60,
+    current_minute: Annotated[int, Query(ge=0)] = 0,
     coach_id: str | None = None,
     athlete_id: str | None = None,
     referee_crew_id: str | None = None,
@@ -302,12 +348,42 @@ def repair_demo(
         number_of_athletes=number_of_athletes,
         number_of_teams=number_of_teams,
         number_of_referee_crews=number_of_referee_crews,
+        number_of_divisions=number_of_divisions,
+        target_tournament_minutes=target_tournament_minutes,
         seed=seed,
     )
     try:
         original_schedule = build_optimized_schedule(tournament)
     except ScheduleError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+    if emergency_type == "coach_conflict" and not coach_id and tournament.coaches:
+        preferred_coaches = ["coach-16", "coach-17", "coach-9", "coach-7"]
+        ordered_coaches = [
+            coach
+            for coach_id_candidate in preferred_coaches
+            for coach in tournament.coaches
+            if coach.id == coach_id_candidate
+        ]
+        ordered_coaches.extend([coach for coach in tournament.coaches if coach.id not in preferred_coaches])
+        for demo_minute in [0, 1, 5, 10, 15, 20, 30, 45, 60, 75, 90, 120]:
+            for coach in ordered_coaches:
+                candidate = try_repair_next_match(
+                    tournament=tournament,
+                    original_schedule=original_schedule,
+                    request=RepairRequest(
+                        emergency_type=emergency_type,
+                        current_minute=demo_minute,
+                        coach_id=coach.id,
+                        athlete_id=athlete_id,
+                        referee_crew_id=referee_crew_id,
+                        ring_id=ring_id,
+                        delay_minutes=delay_minutes,
+                    ),
+                )
+                if candidate.repair_strategy_used in {"same_division_match_swap", "same_ring_match_swap"} and candidate.validation.valid:
+                    return candidate
+        coach_id = tournament.coaches[0].id
 
     return try_repair_next_match(
         tournament=tournament,
@@ -326,10 +402,12 @@ def repair_demo(
 
 @app.get("/api/reschedule/demo", response_model=RescheduleDemoResponse)
 def reschedule_demo(
-    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 3,
-    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 48,
-    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 8,
-    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 4,
+    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 5,
+    number_of_athletes: Annotated[int, Query(ge=8, le=1000)] = 360,
+    number_of_teams: Annotated[int, Query(ge=2, le=100)] = 24,
+    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 10,
+    number_of_divisions: Annotated[int, Query(ge=1, le=200)] = 61,
+    target_tournament_minutes: Annotated[int, Query(ge=120, le=900)] = 480,
     seed: int = 42,
     emergency_type: Literal["medical_delay", "ring_pause", "referee_shortage", "coach_conflict"] = "medical_delay",
     ring_id: str | None = None,
@@ -347,6 +425,8 @@ def reschedule_demo(
         number_of_athletes=number_of_athletes,
         number_of_teams=number_of_teams,
         number_of_referee_crews=number_of_referee_crews,
+        number_of_divisions=number_of_divisions,
+        target_tournament_minutes=target_tournament_minutes,
         seed=seed,
     )
     try:
@@ -393,10 +473,40 @@ def reschedule_demo(
 
     notifications = build_mock_notifications(rescheduled_schedule)
     validation = validate_snapshot(tournament=tournament, schedule=rescheduled_schedule)
+    baseline_schedule = assign_referees_to_schedule(tournament, original_schedule) if tournament.referees else original_schedule
+    hydrated_schedule = (
+        assign_referees_to_schedule(tournament, rescheduled_schedule) if tournament.referees else rescheduled_schedule
+    )
+
+    adjustment_reason = f"Emergency {emergency_type.replace('_', ' ')} reschedule"
+    referee_moves = (
+        diff_referee_assignments(
+            tournament,
+            baseline_schedule,
+            hydrated_schedule,
+            reason=adjustment_reason,
+        )
+        if tournament.referees
+        else []
+    )
+
+    enriched_changes = enrich_schedule_changes(
+        tournament,
+        prior_schedule=baseline_schedule,
+        next_schedule=hydrated_schedule,
+        changed_events=changed_events,
+        reason=adjustment_reason,
+    )
+
+    coordination = build_coordination_board(tournament, hydrated_schedule, current_minute=config.current_minute)
+
     return RescheduleDemoResponse(
-        original_schedule=original_schedule,
-        rescheduled_schedule=rescheduled_schedule,
+        original_schedule=baseline_schedule,
+        rescheduled_schedule=hydrated_schedule,
         changed_events=changed_events,
         notifications=notifications,
         validation=validation,
+        schedule_changes=enriched_changes,
+        referee_adjustments=referee_moves,
+        coordination_board=coordination,
     )

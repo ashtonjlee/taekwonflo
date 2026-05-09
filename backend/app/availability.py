@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .brackets import build_division_detail
+from .brackets import athlete_ids_involved, build_division_detail
 from .models import Match, RingSchedule, Tournament
 
 
@@ -127,6 +127,7 @@ def build_availability_index(
                     match,
                     coach_ids_for_match(tournament, match),
                     event.referee_crew_id,
+                    event.assigned_referee_ids,
                 )
                 _add_match_locations(index, match, requirements)
             index.add_interval("ring", event.ring_id, event.start_minute, event.end_minute, event.event_id, event.ring_id)
@@ -151,30 +152,29 @@ def resource_requirements_for_match(
     match: Match,
     coach_ids: list[str],
     referee_crew_id: str,
+    assigned_referee_ids: list[str] | None = None,
 ) -> dict[str, list[str]]:
-    athlete_ids = [match.competitor_1.competitor_id]
-    if match.competitor_2:
-        athlete_ids.append(match.competitor_2.competitor_id)
-    return {
-        "athlete": athlete_ids,
+    athlete_ids_list = athlete_ids_involved(match)
+    req: dict[str, list[str]] = {
+        "athlete": athlete_ids_list,
         "coach": coach_ids,
         "referee_crew": [referee_crew_id],
         "ring": [match.ring_id],
     }
+    refs = assigned_referee_ids if assigned_referee_ids is not None else match.assigned_referee_ids
+    if refs:
+        req["referee"] = list(refs)
+    return req
 
 
 def coach_ids_for_match(tournament: Tournament, match: Match) -> list[str]:
     athlete_by_id = {athlete.id: athlete for athlete in tournament.athletes}
-    competitor_ids = [match.competitor_1.competitor_id]
-    if match.competitor_2:
-        competitor_ids.append(match.competitor_2.competitor_id)
-    return sorted(
-        {
-            coach_id
-            for athlete_id in competitor_ids
-            for coach_id in athlete_by_id[athlete_id].coach_ids
-        }
-    )
+    aggregate: set[str] = set()
+    for roster_id in athlete_ids_involved(match):
+        athlete_row = athlete_by_id.get(roster_id)
+        if athlete_row:
+            aggregate.update(athlete_row.coach_ids)
+    return sorted(aggregate)
 
 
 def _add_match_locations(

@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import RingColumn from './RingColumn'
 import {
   formatDuration,
@@ -18,6 +19,46 @@ function isAffectedRing(emergencySummary, ring) {
   return affected === ring.ring_id || affected === ring.ring_name
 }
 
+function computeRingDelayTotals(ringEvents, changedEventMap) {
+  let rescheduled = 0
+  let delayMinutes = 0
+
+  ringEvents.forEach((eventItem) => {
+    const delta = changedEventMap[eventItem.event_id]
+    if (!delta || delta.new_start_minute <= delta.original_start_minute) {
+      return
+    }
+
+    rescheduled += 1
+    delayMinutes += Math.max(0, delta.new_start_minute - delta.original_start_minute)
+  })
+
+  return { rescheduled, delayMinutes }
+}
+
+const COORD_PHASE_RANK = {
+  currently_competing: 0,
+  report_staging: 1,
+  report_holding: 2,
+  warm_up_now: 3,
+  completed: 4,
+}
+
+function coordinatorEventLookups(coordinationBoard) {
+  const rows = [...(coordinationBoard?.rows || [])].sort(
+    (a, b) => (COORD_PHASE_RANK[a.phase] ?? 9) - (COORD_PHASE_RANK[b.phase] ?? 9),
+  )
+  const matchNumByEvent = {}
+  const focusMatchByEvent = {}
+  for (const row of rows) {
+    if (!(row.event_id in focusMatchByEvent)) {
+      matchNumByEvent[row.event_id] = row.match_number
+      focusMatchByEvent[row.event_id] = row.match_id
+    }
+  }
+  return { matchNumByEvent, focusMatchByEvent }
+}
+
 export default function ScheduleDashboard({
   originalSchedule = [],
   currentSchedule = [],
@@ -25,7 +66,24 @@ export default function ScheduleDashboard({
   validation = null,
   emergencySummary = null,
   onSelectDivision,
+  expandedRingIds = new Set(),
+  onToggleRing,
+  ringOperationalHints = {},
+  coordinationBoard = null,
 }) {
+  const { matchNumByEvent, focusMatchByEvent } = useMemo(
+    () => coordinatorEventLookups(coordinationBoard),
+    [coordinationBoard],
+  )
+
+  const divisionSelectWithFocus = onSelectDivision
+    ? (eventLike) =>
+        onSelectDivision({
+          ...eventLike,
+          division_id: eventLike.division_id,
+          focus_match_id: focusMatchByEvent[eventLike.event_id] || eventLike.focus_match_id || undefined,
+        })
+    : onSelectDivision
   const changedEventMap = Object.fromEntries(changedEvents.map((event) => [event.event_id, event]))
   const beforeMakespan = getMakespan(originalSchedule)
   const afterMakespan = getMakespan(currentSchedule)
@@ -182,7 +240,15 @@ export default function ScheduleDashboard({
                 No upcoming events in the staging window.
               </p>
             ) : (
-              stagingGroups.map((group) => <StagingLane key={group.id} group={group} currentMinute={currentMinute} />)
+              stagingGroups.map((group) => (
+                <StagingLane
+                  key={group.id}
+                  group={group}
+                  currentMinute={currentMinute}
+                  onSelectDivision={divisionSelectWithFocus}
+                  matchHintByEventId={matchNumByEvent}
+                />
+              ))
             )}
           </div>
         </div>
@@ -198,7 +264,13 @@ export default function ScheduleDashboard({
             changedEventMap={changedEventMap}
             currentMinute={currentMinute}
             emergencySummary={emergencySummary}
-            onSelectDivision={onSelectDivision}
+            onSelectDivision={divisionSelectWithFocus}
+            isExpanded={expandedRingIds.has(ring.ring_id)}
+            onExpandToggle={() => onToggleRing(ring.ring_id)}
+            ringDelayTotals={computeRingDelayTotals(ring.events || [], changedEventMap)}
+            validationPassed={validationPassed}
+            operationalHint={ringOperationalHints?.[ring.ring_id] ?? null}
+            matchHintByEventId={matchNumByEvent}
           />
         ))}
       </div>
@@ -242,7 +314,7 @@ function Metric({ label, value, detail, tone = 'slate' }) {
   )
 }
 
-function StagingLane({ group, currentMinute }) {
+function StagingLane({ group, currentMinute, onSelectDivision, matchHintByEventId = {} }) {
   return (
     <div className="rounded-md border border-blue-100 bg-white p-3">
       <div className="flex items-center justify-between gap-3">
@@ -255,10 +327,18 @@ function StagingLane({ group, currentMinute }) {
         ) : (
           group.events.map((event, index) => {
             const minutesUntilStart = event.start_minute - currentMinute
+            const mh = matchHintByEventId[event.event_id]
             return (
-              <div
+              <button
+                type="button"
                 key={`${group.id}-${event.event_id || event.id}-${index}`}
-                className="grid grid-cols-[4.25rem_1fr] gap-3 rounded border border-slate-100 bg-slate-50 p-2 text-sm"
+                onClick={() =>
+                  onSelectDivision?.({
+                    ...event,
+                    division_id: event.division_id,
+                  })
+                }
+                className="grid w-full grid-cols-[4.25rem_1fr] gap-3 rounded border border-slate-100 bg-slate-50 p-2 text-left text-sm transition-colors hover:border-blue-200 hover:bg-blue-50/60 focus:outline-none focus:ring-2 focus:ring-blue-400"
               >
                 <div className="text-xs font-semibold text-blue-700">
                   {minutesUntilStart === 0 ? 'now' : `${minutesUntilStart} min`}
@@ -267,11 +347,13 @@ function StagingLane({ group, currentMinute }) {
                   <div className="truncate font-semibold text-slate-900">
                     {event.division_name || event.division || 'Unknown division'}
                   </div>
+                  {mh !== undefined ? <div className="mt-0.5 text-[11px] font-semibold text-slate-700">Match {mh}</div> : null}
                   <div className="mt-0.5 text-xs text-slate-600">
-                    {formatMinuteRange(event.start_minute, event.end_minute)} - {event.ring_name || event.ring_id}
+                    {formatMinuteRange(event.start_minute, event.end_minute)} — {event.ring_name || event.ring_id}
                   </div>
+                  <div className="sr-only">Open division detail</div>
                 </div>
-              </div>
+              </button>
             )
           })
         )}

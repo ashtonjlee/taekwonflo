@@ -7,6 +7,7 @@ export default function EventCard({
   isPaused = false,
   onSelectDivision,
   tournamentStartTime = '09:00',
+  coordinationMatchNumber,
 }) {
   const divisionName = event.division_name || event.division || 'Unknown division'
   const timeLabel =
@@ -68,6 +69,9 @@ export default function EventCard({
             <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${statusStyle.dot}`} />
             <div className="truncate font-semibold text-slate-900">{divisionName}</div>
           </div>
+          {coordinationMatchNumber !== undefined ? (
+            <div className="mt-1 text-[11px] font-semibold text-slate-700">Match {coordinationMatchNumber}</div>
+          ) : null}
           <div className="mt-1 text-[11px] font-medium text-slate-500">
             {formatDuration(event.start_minute, event.end_minute)}
           </div>

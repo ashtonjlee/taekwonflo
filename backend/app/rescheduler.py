@@ -6,6 +6,7 @@ from typing import Literal
 from ortools.sat.python import cp_model
 
 from .models import ChangedEvent, RingSchedule, ScheduledEvent, Tournament, TournamentEvent
+from .schedule_ops import assign_referees_to_schedule
 
 EmergencyType = Literal["medical_delay", "ring_pause", "referee_shortage", "coach_conflict"]
 
@@ -274,6 +275,8 @@ def reoptimize_future_events(
         )
 
     rescheduled_schedule = _group_events_by_ring(tournament, rescheduled_events)
+    if tournament.referees:
+        rescheduled_schedule = assign_referees_to_schedule(tournament, rescheduled_schedule)
     changed_events = _collect_changes(original_by_event_id, rescheduled_events)
     return rescheduled_schedule, changed_events
 
