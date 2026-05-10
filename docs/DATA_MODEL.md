@@ -123,6 +123,31 @@ Large divisions should eventually decompose into match/flight records that can b
 Current API payloads still include division-level `ScheduledEvent` blocks in several paths. Those blocks are a compatibility
 surface for the demo UI, not a rule that a real division must stay on one ring.
 
+## CSV Import
+
+`POST /api/import/csv` accepts a multipart CSV upload and returns the same schedule shape as `/api/mock/snapshot`, plus a
+`preview` object containing athlete/team/division counts, detected columns, and warnings. Flexible columns include:
+
+- `athlete_name`
+- `team_name`
+- `coach_name`
+- `gender`
+- `age_group`
+- `belt_rank`
+- `weight_class`
+- `event_type`
+- `division_name`
+
+When rings or referee crews are not present in the CSV, the backend uses demo defaults. Missing optional fields produce warnings
+and deterministic defaults instead of crashing.
+
+## Live Time Simulation
+
+The frontend can advance `current_minute` locally in 15-minute or 1-hour steps, play a timelapse, reset to start, and inject
+manual or random delays. The same schedule payload is reused; `/api/operations/live` recalculates current/next rings, staging,
+holding, and completed buckets for the selected minute. When a delay is injected, the existing repair/reschedule endpoints return
+an updated schedule and the frontend appends a visible event-log entry.
+
 ## Timing Assumptions
 
 Durations are hackathon estimates, not official timing rules. Real tournament timing varies by event manual, age group, belt level, division size, staging, equipment checks, video review, protests, and ring operations.

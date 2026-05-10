@@ -4,7 +4,8 @@
 
 1. Start the backend API.
 2. Start the Vite frontend.
-3. Confirm the dashboard shows rings (collapsed summaries by default — expand to see event cards), the staging queue, validation tiles, and the **`Live Reports`** pane (event coordinator buckets, schedule deltas, referee moves).
+3. Optionally upload a CSV in **CSV Import**. Confirm the preview shows athletes, teams, divisions, detected columns, and warnings, then the generated schedule loads into the normal dashboard.
+4. Confirm the dashboard shows rings (collapsed summaries by default — expand to see event cards), the staging queue, validation tiles, and the **`Live Reports`** pane (event coordinator buckets, schedule deltas, referee moves).
 4. **Narrative hook (target model):** explain that the product direction in `docs/SCHEDULING_CONSTRAINTS.md` is **match/flight-first scheduling** with **global stable match numbers** (one number for the whole day, unchanged if a bout moves ring/time) and **division splitting** (e.g., poomsae flights or parallel kyorugi quarterfinals across rings). The current MVP demo may still show **division-level** ring cards while brackets already expose **per-match** numbers and placeholders.
 
 ## Division Detail Flow
@@ -32,7 +33,7 @@
 ## Emergency Flow
 
 1. Run a medical delay or ring pause.
-2. Confirm the dashboard updates delayed/paused ring counts and changed events.
+2. Confirm the medical pause uses a 5-minute default and visibly delays future work on the affected ring. Schedule-change rows should show old start → new start.
 3. Click a rescheduled division to show that bracket detail remains available.
 4. Explain that completed and active division events are frozen, while future work is locally repaired when feasible.
 5. Scroll **`Live Reports` → Schedule changes** to narrate tangible deltas per match (numbers, roster strings, referee assignments).
@@ -44,3 +45,8 @@
 3. Point out that lower-official-count work is preferred during the shortage window and higher-official-count events can be delayed.
 4. If individual borrowing occurs, cite **`Live Reports` → Referee adjustments** to show who slid crews and for which ring window.
 
+## Live Time Flow
+
+1. Use **Live Demo** controls to step +15 minutes or +1 hour. Collapsed rings, staging buckets, current/next labels, Gantt “now” marker, and bracket detail status should update from the same `current_minute`.
+2. Press Play and adjust speed to show timelapse progression.
+3. Enable random delays or inject a manual coach/referee/medical delay. Confirm the event log records the trigger and the schedule/repair response updates the dashboard.

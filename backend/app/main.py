@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import csv
+import io
+import re
 from typing import Annotated
 from typing import Literal
 
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Query
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from pydantic import BaseModel, Field
@@ -15,7 +19,7 @@ from .data_generator import generate_tournament
 from .demo_scenarios import find_impactful_demo_scenario
 from .local_repair import RepairRequest, try_repair_next_match
 from .match_numbers import build_published_match_number_map
-from .models import ChangedEvent, DivisionDetail, RepairDemoResponse, RescheduleDemoResponse, RingSchedule, SnapshotResponse, SnapshotValidationResponse, Tournament
+from .models import Athlete, ChangedEvent, Coach, Division, DivisionDetail, Referee, RefereeCrew, RepairDemoResponse, RescheduleDemoResponse, Ring, RingSchedule, ScheduledEvent, SnapshotResponse, SnapshotValidationResponse, Team, Tournament, TournamentEvent
 from .notifications import build_mock_notifications
 from .rescheduler import EmergencyConfig, RescheduleError, reoptimize_future_events
 from .scheduler import ScheduleError, build_optimized_schedule
@@ -46,6 +50,13 @@ class LiveOperationsRequest(BaseModel):
     original_schedule: list[RingSchedule] | None = None
     current_minute: int = Field(default=0, ge=0)
     changed_events: list[ChangedEvent] = Field(default_factory=list)
+
+
+class DivisionDetailRequest(BaseModel):
+    tournament: Tournament
+    schedule: list[RingSchedule]
+    current_minute: int = Field(default=0, ge=0)
+    focus_match_id: str | None = None
 
 
 @app.post("/api/operations/live")
@@ -282,6 +293,356 @@ def _change_metrics(changed_events: list[ChangedEvent]) -> tuple[int, float, int
     return len(changed_events), average_delay, max_delay
 
 
+def _medical_pause_shift(
+    schedule: list[RingSchedule],
+    *,
+    ring_id: str,
+    pause_start_minute: int,
+    pause_duration_minutes: int,
+) -> tuple[list[RingSchedule], list[ChangedEvent]]:
+    changed: list[ChangedEvent] = []
+    shifted: list[RingSchedule] = []
+    duration = max(1, pause_duration_minutes)
+    for ring in schedule:
+        events: list = []
+        for event in ring.events:
+            updated = event.model_copy()
+            if event.ring_id == ring_id and event.end_minute > pause_start_minute:
+                updated.start_minute = event.start_minute + duration
+                updated.end_minute = event.end_minute + duration
+                changed.append(
+                    ChangedEvent(
+                        event_id=event.event_id,
+                        changes=["medical_pause_delay", "start_time_changed"],
+                        original_ring_id=event.ring_id,
+                        new_ring_id=event.ring_id,
+                        original_referee_crew_id=event.referee_crew_id,
+                        new_referee_crew_id=event.referee_crew_id,
+                        original_start_minute=event.start_minute,
+                        new_start_minute=updated.start_minute,
+                    )
+                )
+            events.append(updated)
+        shifted.append(RingSchedule(ring_id=ring.ring_id, ring_name=ring.ring_name, events=sorted(events, key=lambda row: row.start_minute)))
+    return shifted, changed
+
+
+def _slug(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower()).strip("-")
+    return cleaned or fallback
+
+
+def _norm_column(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
+
+
+def _pick(row: dict[str, str], *keys: str, default: str = "") -> str:
+    for key in keys:
+        value = row.get(key)
+        if value:
+            return value.strip()
+    return default
+
+
+def _enum_age(value: str) -> str:
+    text = value.lower()
+    if "peewee" in text or "pee wee" in text:
+        return "peewee"
+    if "cadet" in text:
+        return "cadet"
+    if "senior" in text or "adult" in text:
+        return "senior"
+    return "junior"
+
+
+def _enum_gender(value: str) -> str:
+    text = value.lower()
+    if text.startswith("f"):
+        return "female"
+    if text.startswith("m"):
+        return "male"
+    return "male"
+
+
+def _enum_belt(value: str) -> str:
+    text = value.lower()
+    if "world" in text:
+        return "world_class"
+    if "color" in text or "colour" in text or "green" in text or "blue" in text or "red" in text:
+        return "color_belt"
+    return "black_belt"
+
+
+def _enum_event_type(value: str) -> str:
+    text = value.lower()
+    if "team" in text and "poom" in text:
+        return "team_poomsae"
+    if "pair" in text and "poom" in text:
+        return "pair_poomsae"
+    if "poom" in text or "form" in text:
+        return "poomsae"
+    return "kyorugi"
+
+
+def _marked(value: str) -> bool:
+    return value.strip().lower() in {"x", "yes", "y", "true", "1", "registered"}
+
+
+def _age_group_from_competition_age(value: str) -> str:
+    try:
+        age = int(float(value))
+    except (TypeError, ValueError):
+        return _enum_age(value)
+    if age <= 11:
+        return "peewee"
+    if age <= 14:
+        return "cadet"
+    if age <= 17:
+        return "junior"
+    return "senior"
+
+
+def _event_registrations(row: dict[str, str]) -> list[str]:
+    events: list[str] = []
+    if _marked(row.get("forms", "")):
+        events.append("poomsae")
+    if _marked(row.get("forms_pair", "")):
+        events.append("pair_poomsae")
+    if _marked(row.get("olympic_sparring", "")):
+        events.append("kyorugi")
+    if _marked(row.get("team_forms", "")):
+        events.append("team_poomsae")
+    explicit = _pick(row, "event_type", "event", "category")
+    if explicit:
+        events.append(_enum_event_type(explicit))
+    return sorted(set(events))
+
+
+def _csv_rows_with_detected_header(csv_text: str) -> tuple[list[str], list[dict[str, str]], list[str]]:
+    raw_rows = list(csv.reader(io.StringIO(csv_text)))
+    warnings: list[str] = []
+    header_index: int | None = None
+    for idx, raw in enumerate(raw_rows):
+        normalized = {_norm_column(col) for col in raw}
+        if "name" in normalized and ("school" in normalized or "org_id" in normalized):
+            header_index = idx
+            break
+    if header_index is None:
+        raise HTTPException(status_code=422, detail="Could not find attendee CSV header row with Name/School columns.")
+    if header_index > 0:
+        warnings.append(f"Skipped {header_index} title/preamble row(s) before the real CSV header.")
+    header = [_norm_column(col) for col in raw_rows[header_index]]
+    original_header = raw_rows[header_index]
+    rows: list[dict[str, str]] = []
+    for raw in raw_rows[header_index + 1 :]:
+        if not any(cell.strip() for cell in raw):
+            continue
+        padded = raw + [""] * max(0, len(header) - len(raw))
+        rows.append({header[col_idx]: (padded[col_idx] or "").strip() for col_idx in range(len(header))})
+    return original_header, rows, warnings
+
+
+def _parse_csv_tournament(csv_text: str, *, rings_count: int = 5, referee_crews_count: int = 10) -> tuple[Tournament, list[str], list[str]]:
+    original_columns, rows, warnings = _csv_rows_with_detected_header(csv_text)
+    if not rows:
+        raise HTTPException(status_code=422, detail="CSV has no athlete rows.")
+    required = {"name", "school"}
+    missing = sorted(required - set(rows[0].keys()))
+    if missing:
+        warnings.append(f"Missing common column(s): {', '.join(missing)}. Defaults/inference were used where possible.")
+
+    teams_by_name: dict[str, Team] = {}
+    coaches_by_key: dict[tuple[str, str], Coach] = {}
+    official_names: list[str] = []
+    athletes: list[Athlete] = []
+    division_rosters: dict[str, dict[str, object]] = {}
+
+    for idx, row in enumerate(rows, start=1):
+        person_name = _pick(row, "athlete_name", "athlete", "name", default=f"Attendee {idx}")
+        team_name = _pick(row, "team_name", "team", "school", "club", default="Independent")
+        is_coach = _marked(row.get("coach", ""))
+        is_official = _marked(row.get("official", ""))
+        team = teams_by_name.get(team_name)
+        if not team:
+            team = Team(id=f"team-{len(teams_by_name)+1}", name=team_name, coach_ids=[])
+            teams_by_name[team_name] = team
+        if is_coach:
+            coach_key = (team.id, person_name)
+            if coach_key not in coaches_by_key:
+                coach = Coach(id=f"coach-{len(coaches_by_key)+1}", name=person_name, team_id=team.id)
+                coaches_by_key[coach_key] = coach
+                team.coach_ids.append(coach.id)
+        if is_official:
+            official_names.append(person_name)
+
+    for idx, row in enumerate(rows, start=1):
+        person_name = _pick(row, "athlete_name", "athlete", "name", default=f"Attendee {idx}")
+        team_name = _pick(row, "team_name", "team", "school", "club", default="Independent")
+        registrations = _event_registrations(row)
+        team = teams_by_name[team_name]
+        if not registrations:
+            continue
+
+        if not team.coach_ids:
+            placeholder_name = f"{team_name} Coach"
+            coach_key = (team.id, placeholder_name)
+            if coach_key not in coaches_by_key:
+                coach = Coach(id=f"coach-{len(coaches_by_key)+1}", name=placeholder_name, team_id=team.id)
+                coaches_by_key[coach_key] = coach
+                team.coach_ids.append(coach.id)
+                warnings.append(f"No explicit coach for {team_name}; created placeholder coach.")
+
+        age_source = _pick(row, "competition_age", "age", "age_group", default="junior")
+        age_group = _age_group_from_competition_age(age_source)
+        gender = _enum_gender(_pick(row, "gender", "sex", default="male"))
+        belt = _enum_belt(_pick(row, "belt_rank", "rank", "belt", "belt_level", default="black_belt"))
+        weight = _pick(row, "weight_class", "weight", default="Open")
+
+        athlete = Athlete(
+            id=f"athlete-{len(athletes)+1}",
+            name=person_name,
+            team_id=team.id,
+            coach_ids=[team.coach_ids[0]],
+            age_group=age_group,  # type: ignore[arg-type]
+            gender=gender,  # type: ignore[arg-type]
+            belt_level=belt,  # type: ignore[arg-type]
+        )
+        athletes.append(athlete)
+        for event_type in registrations:
+            weight_key = weight if event_type == "kyorugi" else "Open"
+            gender_key = gender if event_type in {"kyorugi", "poomsae"} else "mixed"
+            event_label = {
+                "poomsae": "Individual Poomsae",
+                "pair_poomsae": "Pair Poomsae",
+                "team_poomsae": "Team Poomsae",
+                "kyorugi": "Olympic Sparring",
+            }[event_type]
+            division_name = _pick(
+                row,
+                "division_name",
+                "division",
+                default=f"{age_group.title()} {gender_key.title()} {belt.replace('_', ' ').title()} {weight_key} {event_label}",
+            )
+            div_key = "|".join([event_type, gender_key, age_group, belt, weight_key, division_name])
+            division_rosters.setdefault(
+                div_key,
+                {
+                    "name": division_name,
+                    "event_type": event_type,
+                    "age_group": age_group,
+                    "gender": gender_key,
+                    "belt": belt,
+                    "weight": weight_key,
+                    "athletes": [],
+                    "teams": set(),
+                },
+            )
+            division_rosters[div_key]["athletes"].append(athlete.id)  # type: ignore[index,union-attr]
+            division_rosters[div_key]["teams"].add(team.id)  # type: ignore[index,union-attr]
+
+    if not athletes:
+        raise HTTPException(status_code=422, detail="CSV did not contain any athlete event registrations marked with X.")
+
+    divisions: list[Division] = []
+    events: list[TournamentEvent] = []
+    for idx, data in enumerate(division_rosters.values(), start=1):
+        athlete_ids = list(data["athletes"])  # type: ignore[arg-type]
+        team_ids = sorted(data["teams"])  # type: ignore[arg-type]
+        event_type = data["event_type"]
+        duration = max(12, len(athlete_ids) * (4 if event_type == "kyorugi" else 3))
+        div_id = f"division-{idx}"
+        divisions.append(
+            Division(
+                id=div_id,
+                name=str(data["name"]),
+                event_type=event_type,  # type: ignore[arg-type]
+                age_group=data["age_group"],  # type: ignore[arg-type]
+                gender=data["gender"],  # type: ignore[arg-type]
+                weight_class=str(data["weight"]),
+                belt_level=data["belt"],  # type: ignore[arg-type]
+                belt_rank_group=data["belt"],  # type: ignore[arg-type]
+                bracket_type="single_elimination" if event_type == "kyorugi" else "poomsae_rounds",
+                poomsae_rounds=[] if event_type == "kyorugi" else ["preliminary", "final"],
+                bracket_size=len(athlete_ids),
+                competitor_count=len(athlete_ids),
+                round_structure=[],
+                athlete_ids=athlete_ids,
+                team_ids=team_ids,
+                estimated_duration_minutes=duration,
+            )
+        )
+        required_coaches = sorted({cid for athlete in athletes if athlete.id in athlete_ids for cid in athlete.coach_ids})
+        events.append(
+            TournamentEvent(
+                event_id=f"event-{idx}",
+                division_id=div_id,
+                division_name=str(data["name"]),
+                event_type=event_type,  # type: ignore[arg-type]
+                age_group=data["age_group"],  # type: ignore[arg-type]
+                belt_rank_group=data["belt"],  # type: ignore[arg-type]
+                weight_class=str(data["weight"]),
+                athlete_ids=athlete_ids,
+                team_ids=team_ids,
+                required_coach_ids=required_coaches,
+                required_referee_count=5 if event_type != "kyorugi" and len(athlete_ids) >= 8 else 3,
+                estimated_duration_minutes=duration,
+                buffer_minutes=5,
+                status="unscheduled",
+            )
+        )
+
+    rings = [Ring(id=f"ring-{idx}", name=f"Ring {idx}") for idx in range(1, rings_count + 1)]
+    referee_names = official_names or []
+    while len(referee_names) < referee_crews_count * 4:
+        referee_names.append(f"Referee {len(referee_names) + 1}")
+    referees = [
+        Referee(
+            referee_id=f"ref-{idx}",
+            name=name,
+            home_crew_id=f"ref-crew-{((idx - 1) % referee_crews_count) + 1}",
+            qualifications=["kyorugi", "poomsae", "judge"],
+        )
+        for idx, name in enumerate(referee_names, start=1)
+    ]
+    crews = [
+        RefereeCrew(
+            id=f"ref-crew-{idx}",
+            name=f"Crew {idx}",
+            referee_ids=[ref.referee_id for ref in referees if ref.home_crew_id == f"ref-crew-{idx}"],
+        )
+        for idx in range(1, referee_crews_count + 1)
+    ]
+    tournament = Tournament(
+        id="csv-import",
+        name="Imported CSV Tournament",
+        rings=rings,
+        teams=list(teams_by_name.values()),
+        coaches=list(coaches_by_key.values()),
+        athletes=athletes,
+        divisions=divisions,
+        referee_crews=crews,
+        referees=referees,
+        events=events,
+    )
+    return tournament, original_columns, warnings
+
+
+def _extract_uploaded_csv(body: bytes, content_type: str) -> str:
+    if "multipart/form-data" not in content_type:
+        return body.decode("utf-8-sig")
+    match = re.search(r"boundary=([^;]+)", content_type)
+    if not match:
+        raise HTTPException(status_code=400, detail="Multipart upload missing boundary.")
+    boundary = ("--" + match.group(1).strip().strip('"')).encode()
+    for part in body.split(boundary):
+        if b"filename=" not in part:
+            continue
+        _, _, payload = part.partition(b"\r\n\r\n")
+        payload = payload.rsplit(b"\r\n", 1)[0]
+        return payload.decode("utf-8-sig")
+    raise HTTPException(status_code=400, detail="Multipart upload did not include a file.")
+
+
 @app.get("/api/mock/snapshot", response_model=SnapshotResponse)
 def get_mock_snapshot(
     number_of_rings: Annotated[int, Query(ge=1, le=20)] = 5,
@@ -307,6 +668,186 @@ def get_mock_snapshot(
         raise HTTPException(status_code=422, detail=str(error)) from error
     notifications = build_mock_notifications(schedule)
     return SnapshotResponse(tournament=tournament, schedule=schedule, notifications=notifications)
+
+
+def _relaxed_greedy_schedule(tournament: Tournament) -> tuple[list[RingSchedule], list[str]]:
+    """Best-effort schedule used when strict CP-SAT cannot find a feasible plan.
+
+    Enforces hard ring/athlete/coach no-overlap. Referee shortages and judge counts are
+    warned about rather than rejected. Lays events down on rings in chronological order.
+    """
+    relax_warnings: list[str] = []
+    if not tournament.rings:
+        raise HTTPException(status_code=422, detail="No rings available; cannot relax import.")
+    if not tournament.referee_crews:
+        raise HTTPException(status_code=422, detail="No referee crews available; cannot relax import.")
+
+    # Stable order: heavy events first, then by event_id.
+    events_order = sorted(
+        tournament.events,
+        key=lambda evt: (
+            -(evt.estimated_duration_minutes + evt.buffer_minutes),
+            evt.event_id,
+        ),
+    )
+
+    ring_busy: dict[str, list[tuple[int, int]]] = {ring.id: [] for ring in tournament.rings}
+    crew_busy: dict[str, list[tuple[int, int]]] = {crew.id: [] for crew in tournament.referee_crews}
+    athlete_busy: dict[str, list[tuple[int, int]]] = {}
+    coach_busy: dict[str, list[tuple[int, int]]] = {}
+
+    def first_free(intervals: list[tuple[int, int]], earliest: int, duration: int) -> int:
+        intervals_sorted = sorted(intervals)
+        candidate = earliest
+        for s, e in intervals_sorted:
+            if candidate + duration <= s:
+                return candidate
+            candidate = max(candidate, e)
+        return candidate
+
+    placed: list[ScheduledEvent] = []
+    for evt in events_order:
+        duration = evt.estimated_duration_minutes + evt.buffer_minutes
+        best: tuple[int, str, str] | None = None  # (start, ring_id, crew_id)
+        for ring in tournament.rings:
+            for crew in tournament.referee_crews:
+                earliest = 0
+                # athlete + coach constraints
+                people_intervals: list[tuple[int, int]] = []
+                for aid in evt.athlete_ids:
+                    people_intervals.extend(athlete_busy.get(aid, []))
+                for cid in evt.required_coach_ids:
+                    people_intervals.extend(coach_busy.get(cid, []))
+                while True:
+                    cand_ring = first_free(ring_busy[ring.id], earliest, duration)
+                    cand_crew = first_free(crew_busy[crew.id], cand_ring, duration)
+                    cand_people = first_free(people_intervals, cand_crew, duration)
+                    if cand_people == cand_crew == cand_ring:
+                        candidate_start = cand_people
+                        break
+                    earliest = cand_people
+                if best is None or candidate_start < best[0]:
+                    best = (candidate_start, ring.id, crew.id)
+        if best is None:
+            relax_warnings.append(
+                f"Skipped event '{evt.event_id}' ({evt.division_name}) — could not find any ring/crew slot."
+            )
+            continue
+        start, ring_id, crew_id = best
+        end = start + duration
+        ring_busy[ring_id].append((start, end))
+        crew_busy[crew_id].append((start, end))
+        for aid in evt.athlete_ids:
+            athlete_busy.setdefault(aid, []).append((start, end))
+        for cid in evt.required_coach_ids:
+            coach_busy.setdefault(cid, []).append((start, end))
+
+        ring_obj = next(ring for ring in tournament.rings if ring.id == ring_id)
+        crew_obj = next(crew for crew in tournament.referee_crews if crew.id == crew_id)
+        # Referee shortage check: warn if crew has fewer referees than required count.
+        if len(crew_obj.referee_ids) < evt.required_referee_count:
+            relax_warnings.append(
+                f"Crew '{crew_obj.name}' has {len(crew_obj.referee_ids)} referees but "
+                f"event '{evt.event_id}' requires {evt.required_referee_count}; staffed best-effort."
+            )
+
+        placed.append(
+            ScheduledEvent(
+                event_id=evt.event_id,
+                division_id=evt.division_id,
+                division_name=evt.division_name,
+                event_type=evt.event_type,
+                age_group=evt.age_group,
+                belt_rank_group=evt.belt_rank_group,
+                weight_class=evt.weight_class,
+                ring_id=ring_obj.id,
+                ring_name=ring_obj.name,
+                referee_crew_id=crew_obj.id,
+                referee_crew_name=crew_obj.name,
+                start_minute=start,
+                end_minute=end,
+                estimated_duration_minutes=evt.estimated_duration_minutes,
+                buffer_minutes=evt.buffer_minutes,
+                athlete_ids=evt.athlete_ids,
+                team_ids=evt.team_ids,
+                required_coach_ids=evt.required_coach_ids,
+                required_referee_count=evt.required_referee_count,
+                status="scheduled",
+            )
+        )
+
+    by_ring: dict[str, list[ScheduledEvent]] = {ring.id: [] for ring in tournament.rings}
+    for evt in placed:
+        by_ring[evt.ring_id].append(evt)
+    schedule = [
+        RingSchedule(
+            ring_id=ring.id,
+            ring_name=ring.name,
+            events=sorted(by_ring[ring.id], key=lambda item: item.start_minute),
+        )
+        for ring in tournament.rings
+    ]
+    if tournament.referees:
+        schedule = assign_referees_to_schedule(tournament, schedule)
+    return schedule, relax_warnings
+
+
+@app.post("/api/import/csv")
+async def import_csv_schedule(
+    request: Request,
+    number_of_rings: Annotated[int, Query(ge=1, le=20)] = 5,
+    number_of_referee_crews: Annotated[int, Query(ge=1, le=20)] = 10,
+) -> dict[str, object]:
+    csv_text = _extract_uploaded_csv(await request.body(), request.headers.get("content-type", ""))
+    tournament, columns, warnings = _parse_csv_tournament(
+        csv_text,
+        rings_count=number_of_rings,
+        referee_crews_count=number_of_referee_crews,
+    )
+    fallback_used = False
+    solver_status = "OPTIMAL"
+    try:
+        schedule = build_optimized_schedule(tournament)
+    except ScheduleError as error:
+        # relaxed_import_mode: keep ring/athlete/coach no-overlap, warn instead of failing.
+        message = str(error)
+        solver_status = "UNKNOWN"
+        if "solver status:" in message.lower():
+            try:
+                solver_status = message.split("solver status:")[-1].split(")")[0].strip()
+            except Exception:
+                solver_status = "UNKNOWN"
+        warnings.append(f"Strict scheduler failed ({message}); switching to relaxed_import_mode.")
+        schedule, relax_warnings = _relaxed_greedy_schedule(tournament)
+        warnings.extend(relax_warnings)
+        fallback_used = True
+    notifications = build_mock_notifications(schedule)
+    preview = {
+        "athlete_count": len(tournament.athletes),
+        "team_count": len(tournament.teams),
+        "division_count": len(tournament.divisions),
+        "detected_columns": columns,
+        "warnings": warnings,
+        "rows_parsed": len(tournament.athletes),
+        "athletes_created": len(tournament.athletes),
+        "divisions_created": len(tournament.divisions),
+        "solver_status": solver_status,
+        "fallback_used": fallback_used,
+    }
+    return {
+        "tournament": tournament.model_dump(),
+        "schedule": [ring.model_dump() for ring in schedule],
+        "notifications": [note.model_dump() for note in notifications],
+        "preview": preview,
+        "diagnostics": {
+            "rows_parsed": preview["rows_parsed"],
+            "athletes_created": preview["athletes_created"],
+            "divisions_created": preview["divisions_created"],
+            "solver_status": solver_status,
+            "fallback_used": fallback_used,
+            "warnings": warnings,
+        },
+    }
 
 
 @app.get("/api/schedule", response_model=SnapshotResponse)
@@ -397,6 +938,22 @@ def get_division_detail(
         )
     except ScheduleError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=f"Division detail not found for '{division_id}'.") from error
+
+
+@app.post("/api/divisions/{division_id}/detail", response_model=DivisionDetail)
+def post_division_detail(division_id: str, payload: DivisionDetailRequest) -> DivisionDetail:
+    try:
+        stable_match_numbers = build_published_match_number_map(payload.tournament, payload.schedule)
+        return build_division_detail(
+            tournament=payload.tournament,
+            schedule=payload.schedule,
+            division_id=division_id,
+            current_minute=payload.current_minute,
+            focus_match_id=payload.focus_match_id,
+            match_number_by_match_id=stable_match_numbers,
+        )
     except KeyError as error:
         raise HTTPException(status_code=404, detail=f"Division detail not found for '{division_id}'.") from error
 
@@ -529,7 +1086,7 @@ def reschedule_demo(
     referee_crew_id: str | None = None,
     coach_id: str | None = None,
     current_minute: Annotated[int, Query(ge=0)] = 60,
-    delay_minutes: Annotated[int, Query(ge=1)] = 20,
+    delay_minutes: Annotated[int, Query(ge=1)] = 5,
     pause_start_minute: int | None = None,
     pause_duration_minutes: int | None = None,
     unavailable_start_minute: int | None = None,

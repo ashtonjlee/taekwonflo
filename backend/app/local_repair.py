@@ -56,7 +56,126 @@ def try_repair_next_match(
     )
     affected_match = _find_affected_match(affected_detail, request, tournament) if affected_detail else None
 
-    if affected_event and affected_detail and affected_match and request.emergency_type == "coach_conflict":
+    is_coach_or_athlete = request.emergency_type in {"coach_conflict", "athlete_conflict"}
+    is_referee_short = request.emergency_type == "referee_shortage"
+
+    # Strategy 1: same-division adjacent swap (preferred, ideal behavior).
+    if affected_event and affected_detail and affected_match and is_coach_or_athlete:
+        adjacent = try_same_division_adjacent_swap(
+            tournament=tournament,
+            original_schedule=original_schedule,
+            request=request,
+            availability=availability,
+            affected_event=affected_event,
+            affected_detail=affected_detail,
+            affected_match=affected_match,
+        )
+        if adjacent:
+            replacement_match, repaired_detail, changed_matches = adjacent
+            explanation = (
+                f"Coach delayed. Swapped Match {affected_match.match_number} with "
+                f"Match {replacement_match.match_number} in the same division round."
+            )
+            return _response(
+                tournament=tournament,
+                original_schedule=original_schedule,
+                repaired_schedule=original_schedule,
+                strategy="same_division_adjacent_swap",
+                affected_match=affected_match,
+                replacement_match=_match_by_id(repaired_detail, replacement_match.match_id),
+                changed_events=[],
+                changed_matches=changed_matches,
+                resource_locations=_resource_locations(availability, request),
+                notifications=_repair_notifications(affected_match, replacement_match, "same-division adjacent swap"),
+                validation=validate_snapshot(tournament=tournament, schedule=original_schedule, demo_mode=True),
+                division_detail=repaired_detail,
+                operational_minute=request.current_minute,
+                summary_reason=_reason_for_request(request),
+                explanation=explanation,
+            )
+
+    # Strategy 2: same-division next-ready swap (small local window).
+    if affected_event and affected_detail and affected_match and is_coach_or_athlete:
+        next_ready = try_same_division_next_ready_swap(
+            tournament=tournament,
+            original_schedule=original_schedule,
+            request=request,
+            availability=availability,
+            affected_event=affected_event,
+            affected_detail=affected_detail,
+            affected_match=affected_match,
+        )
+        if next_ready:
+            replacement_match, repaired_detail, changed_matches = next_ready
+            explanation = (
+                f"Coach delayed. Swapped Match {affected_match.match_number} with the next ready "
+                f"Match {replacement_match.match_number} in the same division round."
+            )
+            return _response(
+                tournament=tournament,
+                original_schedule=original_schedule,
+                repaired_schedule=original_schedule,
+                strategy="same_division_next_ready_swap",
+                affected_match=affected_match,
+                replacement_match=_match_by_id(repaired_detail, replacement_match.match_id),
+                changed_events=[],
+                changed_matches=changed_matches,
+                resource_locations=_resource_locations(availability, request),
+                notifications=_repair_notifications(affected_match, replacement_match, "same-division next-ready swap"),
+                validation=validate_snapshot(tournament=tournament, schedule=original_schedule, demo_mode=True),
+                division_detail=repaired_detail,
+                operational_minute=request.current_minute,
+                summary_reason=_reason_for_request(request),
+                explanation=explanation,
+            )
+
+    # Strategy 3: small-local-wait (3-6 minute coach delays just wait).
+    if affected_event and affected_match and is_coach_or_athlete and 0 < request.delay_minutes <= 6:
+        small_wait = try_small_local_wait(
+            original_schedule=original_schedule,
+            request=request,
+            affected_event=affected_event,
+            affected_match=affected_match,
+        )
+        if small_wait:
+            repaired_schedule, changed_events, changed_matches = small_wait
+            explanation = (
+                f"Coach delayed {request.delay_minutes} minutes. "
+                f"Match {affected_match.match_number} waited locally; no global reschedule needed."
+            )
+            repaired_detail = build_division_detail(
+                tournament,
+                repaired_schedule,
+                affected_event.division_id,
+                request.current_minute,
+                focus_match_id=affected_match.match_id,
+            )
+            return _response(
+                tournament=tournament,
+                original_schedule=original_schedule,
+                repaired_schedule=repaired_schedule,
+                strategy="small_local_wait",
+                affected_match=affected_match,
+                replacement_match=None,
+                changed_events=changed_events,
+                changed_matches=changed_matches,
+                resource_locations=_resource_locations(availability, request),
+                notifications=[
+                    NotificationMessage(
+                        id="repair-small-wait",
+                        channel="ops",
+                        text=explanation,
+                    )
+                ],
+                validation=validate_snapshot(tournament=tournament, schedule=repaired_schedule, demo_mode=True),
+                division_detail=repaired_detail,
+                operational_minute=request.current_minute,
+                summary_reason=_reason_for_request(request),
+                explanation=explanation,
+            )
+
+    # Strategy 4: same-ring next eligible match (existing local queue repair).
+    if affected_event and affected_detail and affected_match and is_coach_or_athlete:
         queue_repair = try_local_queue_repair(
             tournament=tournament,
             original_schedule=original_schedule,
@@ -67,6 +186,10 @@ def try_repair_next_match(
         )
         if queue_repair:
             repaired_schedule, changed_events, replacement_event, replacement_match, changed_matches = queue_repair
+            explanation = (
+                f"Coach delayed. Swapped {affected_event.ring_name} queue: "
+                f"Match {replacement_match.match_number} runs while Match {affected_match.match_number} waits."
+            )
             return _response(
                 tournament=tournament,
                 original_schedule=original_schedule,
@@ -88,8 +211,10 @@ def try_repair_next_match(
                 ),
                 operational_minute=request.current_minute,
                 summary_reason=_reason_for_request(request),
+                explanation=explanation,
             )
 
+    # Strategy 5: same-division match swap (broader, including ref shortage path).
     if affected_event and affected_detail and affected_match and request.emergency_type != "medical_delay":
         replacement = _find_same_division_replacement(
             tournament=tournament,
@@ -119,6 +244,10 @@ def try_repair_next_match(
                     new_start_minute=affected_event.start_minute,
                 )
             ]
+            explanation = (
+                f"Swapped Match {affected_match.match_number} with Match {replacement.match_number} "
+                f"in the same division ({affected_event.division_name})."
+            )
             return _response(
                 tournament=tournament,
                 original_schedule=original_schedule,
@@ -134,6 +263,7 @@ def try_repair_next_match(
                 division_detail=repaired_detail,
                 operational_minute=request.current_minute,
                 summary_reason=_reason_for_request(request),
+                explanation=explanation,
             )
 
         ring_replacement = _find_same_ring_replacement(
@@ -162,6 +292,10 @@ def try_repair_next_match(
                     reason=_reason_for_request(request),
                 )
             ]
+            explanation = (
+                f"Swapped events on {affected_event.ring_name}: "
+                f"Match {replacement_match.match_number} now runs first."
+            )
             return _response(
                 tournament=tournament,
                 original_schedule=original_schedule,
@@ -177,6 +311,7 @@ def try_repair_next_match(
                 division_detail=affected_detail,
                 operational_minute=request.current_minute,
                 summary_reason=_reason_for_request(request),
+                explanation=explanation,
             )
 
     if request.emergency_type in {"medical_delay", "ring_pause"} and affected_event:
@@ -207,7 +342,53 @@ def try_repair_next_match(
             division_detail=affected_detail,
             operational_minute=request.current_minute,
             summary_reason=_reason_for_request(request),
+            explanation=(
+                f"{affected_event.ring_name} paused for {request.delay_minutes} minutes; later matches on the same ring shifted."
+            ),
         )
+
+    # Last resort fallback: if a coach delay reaches here, prefer a local wait over a global cascade.
+    if affected_event and affected_match and is_coach_or_athlete and request.delay_minutes > 0:
+        small_wait = try_small_local_wait(
+            original_schedule=original_schedule,
+            request=request,
+            affected_event=affected_event,
+            affected_match=affected_match,
+        )
+        if small_wait:
+            repaired_schedule, changed_events, changed_matches = small_wait
+            return _response(
+                tournament=tournament,
+                original_schedule=original_schedule,
+                repaired_schedule=repaired_schedule,
+                strategy="small_local_wait",
+                affected_match=affected_match,
+                replacement_match=None,
+                changed_events=changed_events,
+                changed_matches=changed_matches,
+                resource_locations=_resource_locations(availability, request),
+                notifications=[
+                    NotificationMessage(
+                        id="repair-small-wait",
+                        channel="ops",
+                        text=f"Match {affected_match.match_number} waited {request.delay_minutes} minutes locally.",
+                    )
+                ],
+                validation=validate_snapshot(tournament=tournament, schedule=repaired_schedule, demo_mode=True),
+                division_detail=build_division_detail(
+                    tournament,
+                    repaired_schedule,
+                    affected_event.division_id,
+                    request.current_minute,
+                    focus_match_id=affected_match.match_id,
+                ),
+                operational_minute=request.current_minute,
+                summary_reason=_reason_for_request(request),
+                explanation=(
+                    f"Coach delayed {request.delay_minutes} minutes. "
+                    f"Match {affected_match.match_number} waited locally; no global reschedule needed."
+                ),
+            )
 
     try:
         repaired_schedule, changed_events = reoptimize_future_events(
@@ -247,7 +428,207 @@ def try_repair_next_match(
         division_detail=affected_detail,
         operational_minute=request.current_minute,
         summary_reason=_reason_for_request(request),
+        explanation=(
+            "No local match swap or small wait was feasible; fell back to a global reschedule."
+            if strategy == "global_reschedule"
+            else "No local repair or global reschedule was feasible for this disruption."
+        ),
     )
+
+
+def try_same_division_adjacent_swap(
+    *,
+    tournament: Tournament,
+    original_schedule: list[RingSchedule],
+    request: RepairRequest,
+    availability: AvailabilityIndex,
+    affected_event: ScheduledEvent,
+    affected_detail: DivisionDetail,
+    affected_match: Match,
+) -> tuple[Match, DivisionDetail, list[ChangedMatch]] | None:
+    """If the very next match in the same division+round is ready, swap A and B."""
+    same_round = sorted(
+        [
+            match
+            for match in affected_detail.bracket.matches
+            if match.round_name == affected_match.round_name
+            and match.start_minute >= affected_match.start_minute
+        ],
+        key=lambda match: (match.start_minute, match.match_number),
+    )
+    try:
+        affected_index = next(
+            idx for idx, match in enumerate(same_round) if match.match_id == affected_match.match_id
+        )
+    except StopIteration:
+        return None
+    if affected_index + 1 >= len(same_round):
+        return None
+
+    candidate = same_round[affected_index + 1]
+    if not _candidate_is_ready_for_swap(
+        tournament=tournament,
+        affected_event=affected_event,
+        affected_match=affected_match,
+        detail=affected_detail,
+        candidate=candidate,
+        request=request,
+        availability=availability,
+    ):
+        return None
+
+    repaired_detail, changed_matches = _swap_matches_in_detail(
+        affected_detail,
+        affected_match,
+        candidate,
+        _reason_for_request(request),
+        "same_division_adjacent_swap",
+    )
+    return candidate, repaired_detail, changed_matches
+
+
+def try_same_division_next_ready_swap(
+    *,
+    tournament: Tournament,
+    original_schedule: list[RingSchedule],
+    request: RepairRequest,
+    availability: AvailabilityIndex,
+    affected_event: ScheduledEvent,
+    affected_detail: DivisionDetail,
+    affected_match: Match,
+    scan_window: int = 5,
+) -> tuple[Match, DivisionDetail, list[ChangedMatch]] | None:
+    """Scan the next 3-5 matches/entries in the same division+round; pick the first ready one."""
+    same_round = sorted(
+        [
+            match
+            for match in affected_detail.bracket.matches
+            if match.round_name == affected_match.round_name
+            and match.start_minute > affected_match.start_minute
+        ],
+        key=lambda match: (match.start_minute, match.match_number),
+    )
+    for candidate in same_round[:scan_window]:
+        if candidate.match_id == affected_match.match_id:
+            continue
+        if not _candidate_is_ready_for_swap(
+            tournament=tournament,
+            affected_event=affected_event,
+            affected_match=affected_match,
+            detail=affected_detail,
+            candidate=candidate,
+            request=request,
+            availability=availability,
+        ):
+            continue
+        repaired_detail, changed_matches = _swap_matches_in_detail(
+            affected_detail,
+            affected_match,
+            candidate,
+            _reason_for_request(request),
+            "same_division_next_ready_swap",
+        )
+        return candidate, repaired_detail, changed_matches
+    return None
+
+
+def try_small_local_wait(
+    *,
+    original_schedule: list[RingSchedule],
+    request: RepairRequest,
+    affected_event: ScheduledEvent,
+    affected_match: Match,
+) -> tuple[list[RingSchedule], list[ChangedEvent], list[ChangedMatch]] | None:
+    """Slip the affected event by delay_minutes; cascade only to directly overlapping local events on the same ring."""
+    delay = max(1, request.delay_minutes)
+    repaired: list[RingSchedule] = []
+    changed_events: list[ChangedEvent] = []
+    changed_matches: list[ChangedMatch] = [
+        ChangedMatch(
+            match_id=affected_match.match_id,
+            change_type="small_local_wait",
+            original_start_minute=affected_match.start_minute,
+            new_start_minute=affected_match.start_minute + delay,
+            original_status=affected_match.status,
+            new_status="waiting",
+            reason=_reason_for_request(request),
+        )
+    ]
+
+    for ring in original_schedule:
+        if ring.ring_id != affected_event.ring_id:
+            repaired.append(
+                RingSchedule(
+                    ring_id=ring.ring_id,
+                    ring_name=ring.ring_name,
+                    events=[ScheduledEvent(**event.model_dump()) for event in ring.events],
+                )
+            )
+            continue
+        ordered = sorted(ring.events, key=lambda row: (row.start_minute, row.event_id))
+        new_events: list[ScheduledEvent] = []
+        prev_end: int | None = None
+        for event in ordered:
+            updated = ScheduledEvent(**event.model_dump())
+            new_start = updated.start_minute
+            if event.event_id == affected_event.event_id:
+                new_start = updated.start_minute + delay
+            elif prev_end is not None and updated.start_minute < prev_end:
+                new_start = prev_end
+            if new_start != updated.start_minute:
+                duration = updated.end_minute - updated.start_minute
+                changed_events.append(
+                    ChangedEvent(
+                        event_id=updated.event_id,
+                        changes=["start_time_changed"],
+                        original_ring_id=event.ring_id,
+                        new_ring_id=event.ring_id,
+                        original_referee_crew_id=event.referee_crew_id,
+                        new_referee_crew_id=event.referee_crew_id,
+                        original_start_minute=event.start_minute,
+                        new_start_minute=new_start,
+                    )
+                )
+                updated.start_minute = new_start
+                updated.end_minute = new_start + duration
+            new_events.append(updated)
+            prev_end = updated.end_minute
+        repaired.append(
+            RingSchedule(
+                ring_id=ring.ring_id,
+                ring_name=ring.ring_name,
+                events=sorted(new_events, key=lambda row: row.start_minute),
+            )
+        )
+    return repaired, changed_events, changed_matches
+
+
+def _candidate_is_ready_for_swap(
+    *,
+    tournament: Tournament,
+    affected_event: ScheduledEvent,
+    affected_match: Match,
+    detail: DivisionDetail,
+    candidate: Match,
+    request: RepairRequest,
+    availability: AvailabilityIndex,
+) -> bool:
+    if candidate.match_id == affected_match.match_id:
+        return False
+    if candidate.status not in {"waiting", "staging"}:
+        return False
+    if not _bracket_dependencies_ready(detail, candidate):
+        return False
+    candidate_coach_ids = coach_ids_for_match(tournament, candidate)
+    if _match_uses_blocked_resource(candidate, candidate_coach_ids, affected_event.referee_crew_id, request):
+        return False
+    requirements = resource_requirements_for_match(
+        candidate,
+        candidate_coach_ids,
+        affected_event.referee_crew_id,
+        affected_event.assigned_referee_ids,
+    )
+    return _available_for_current_slot(availability, requirements, affected_match)
 
 
 def try_local_queue_repair(
@@ -641,8 +1022,18 @@ def _available_for_current_slot(
     affected_match: Match,
 ) -> bool:
     conflicts = availability.get_conflicts(requirements, affected_match.start_minute, affected_match.end_minute)
+    # Tolerate the affected match/event itself, and the candidate's own pre-match staging windows
+    # (staging/holding/warmup) — those windows shift with the swap and are not real blockers.
     current_slot_reasons = {affected_match.match_id, affected_match.scheduled_event_id}
-    return all(conflict.reason in current_slot_reasons for conflict in conflicts)
+    for conflict in conflicts:
+        if conflict.reason in current_slot_reasons:
+            continue
+        if conflict.reason in {"staging", "holding", "warmup"}:
+            continue
+        if conflict.reason.startswith("staging for "):
+            continue
+        return False
+    return True
 
 
 def _bracket_dependencies_ready(detail: DivisionDetail, match: Match) -> bool:
@@ -871,6 +1262,7 @@ def _response(
     division_detail: DivisionDetail | None,
     operational_minute: int = 60,
     summary_reason: str = "match repair adjustment",
+    explanation: str = "",
 ) -> RepairDemoResponse:
     baseline_schedule = assign_referees_to_schedule(tournament, original_schedule) if tournament.referees else original_schedule
     hydrated_repair = assign_referees_to_schedule(tournament, repaired_schedule) if tournament.referees else repaired_schedule
@@ -901,6 +1293,14 @@ def _response(
     )
 
     changed_count, average_delay, max_delay = _repair_metrics(changed_events, changed_matches)
+    local_strategies = {
+        "same_division_adjacent_swap",
+        "same_division_next_ready_swap",
+        "same_division_match_swap",
+        "same_ring_match_swap",
+        "small_local_wait",
+        "local_shift",
+    }
     return RepairDemoResponse(
         original_schedule=baseline_schedule,
         repaired_schedule=hydrated_repair,
@@ -920,7 +1320,13 @@ def _response(
         changed_match_count=changed_count,
         average_delay_minutes=average_delay,
         max_delay_minutes=max_delay,
-        queue_repair_applied=strategy in {"same_ring_match_swap", "same_division_match_swap"},
+        queue_repair_applied=strategy in {"same_ring_match_swap", "same_division_match_swap", "same_division_adjacent_swap", "same_division_next_ready_swap"},
+        local_swap_used=strategy in local_strategies,
+        global_reschedule_used=strategy == "global_reschedule",
+        affected_division_id=(affected_match.division_id if affected_match else None),
+        affected_round=(affected_match.round_name if affected_match else None),
+        affected_match_number=(affected_match.match_number if affected_match else None),
+        explanation=explanation,
     )
 
 

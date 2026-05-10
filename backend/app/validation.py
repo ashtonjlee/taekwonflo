@@ -70,6 +70,8 @@ def validate_snapshot(
 
     _validate_schedule_overlaps(schedule, errors)
     _validate_poomsae_before_kyorugi(schedule, errors if demo_mode else warnings)
+    _validate_poomsae_round_block_contiguity(tournament, schedule, errors)
+    _validate_bracket_round_precedence(tournament, schedule, errors)
     _validate_match_level_detail(tournament, schedule, errors, warnings)
 
     _validate_live_operations_hints(tournament, schedule, warnings)
@@ -153,7 +155,43 @@ def _validate_match_level_detail(
         for item in detail.detail_validation.warnings:
             warnings.append(f"{division.id}: {item}")
 
+        if division.event_type in {"poomsae", "pair_poomsae", "team_poomsae"}:
+            round_windows: dict[str, tuple[int, int]] = {}
+            for match in detail.bracket.matches:
+                if match.round_name not in detail.bracket.rounds:
+                    continue
+                current = round_windows.get(match.round_name)
+                if current is None:
+                    round_windows[match.round_name] = (match.start_minute, match.end_minute)
+                else:
+                    round_windows[match.round_name] = (
+                        min(current[0], match.start_minute),
+                        max(current[1], match.end_minute),
+                    )
+            for previous_round, next_round in zip(detail.bracket.rounds, detail.bracket.rounds[1:]):
+                previous_window = round_windows.get(previous_round)
+                next_window = round_windows.get(next_round)
+                if not previous_window or not next_window:
+                    continue
+                previous_end = previous_window[1]
+                next_start = next_window[0]
+                if previous_end > next_start:
+                    errors.append(
+                        f"{division.id}: poomsae round ordering violation: {previous_round} ends T+{previous_end} "
+                        f"after {next_round} starts T+{next_start}."
+                    )
+
         for match in detail.bracket.matches:
+            for feeder_number in [match.feeder_1_match_number, match.feeder_2_match_number]:
+                if feeder_number is None:
+                    continue
+                feeder = next((candidate for candidate in detail.bracket.matches if candidate.match_number == feeder_number), None)
+                if feeder and feeder.end_minute > match.start_minute:
+                    errors.append(
+                        f"{division.id}: bracket dependency violation: Match {match.match_number} starts T+{match.start_minute} "
+                        f"before feeder Match {feeder.match_number} ends T+{feeder.end_minute}."
+                    )
+
             for side_name, side in (("competitor_1", match.competitor_1), ("competitor_2", match.competitor_2)):
                 if not side:
                     continue
@@ -186,6 +224,144 @@ def _validate_poomsae_before_kyorugi(schedule: list[RingSchedule], violations: l
         )
 
 
+def _validate_poomsae_round_block_contiguity(
+    tournament: Tournament,
+    schedule: list[RingSchedule],
+    errors: list[str],
+) -> None:
+    """A poomsae division round block must be contiguous on a single ring.
+
+    Within the start/end window of a (division_id, round_name) block on a given ring,
+    no unrelated division's match may be interleaved.
+    """
+    poomsae_types = {"poomsae", "pair_poomsae", "team_poomsae"}
+    poomsae_division_ids = {
+        division.id for division in tournament.divisions if division.event_type in poomsae_types
+    }
+    if not poomsae_division_ids:
+        return
+
+    division_event_id_to_division = {
+        event.event_id: event.division_id for ring in schedule for event in ring.events
+    }
+
+    for ring in schedule:
+        # Build per-(division, round) block windows from match-level detail.
+        # We collect division windows by walking each poomsae division on this ring once.
+        ring_event_division_ids = {
+            event.division_id for event in ring.events if event.division_id in poomsae_division_ids
+        }
+        round_blocks: list[tuple[str, str, int, int]] = []  # (division_id, round_name, start, end)
+        for division_id in ring_event_division_ids:
+            try:
+                detail = build_division_detail(
+                    tournament=tournament,
+                    schedule=schedule,
+                    division_id=division_id,
+                    current_minute=0,
+                )
+            except (KeyError, ValueError):
+                continue
+            per_round: dict[str, tuple[int, int]] = {}
+            for match in detail.bracket.matches:
+                if match.ring_id != ring.ring_id:
+                    continue
+                cur = per_round.get(match.round_name)
+                if cur is None:
+                    per_round[match.round_name] = (match.start_minute, match.end_minute)
+                else:
+                    per_round[match.round_name] = (
+                        min(cur[0], match.start_minute),
+                        max(cur[1], match.end_minute),
+                    )
+            for round_name, (start, end) in per_round.items():
+                round_blocks.append((division_id, round_name, start, end))
+
+        # Look for any other division event whose window falls strictly inside a poomsae block.
+        for division_id, round_name, block_start, block_end in round_blocks:
+            for event in ring.events:
+                if event.division_id == division_id:
+                    continue
+                # interleaved means strictly inside
+                interleaved = event.start_minute >= block_start and event.end_minute <= block_end
+                # also catch partial overlap that is not a full bracket of the block
+                partial = (
+                    event.start_minute < block_end
+                    and event.end_minute > block_start
+                    and not interleaved
+                )
+                if interleaved or partial:
+                    errors.append(
+                        f"Poomsae round block interrupted on {ring.ring_id}: division "
+                        f"'{division_id}' round '{round_name}' window [{block_start},{block_end}) "
+                        f"is broken by event '{event.event_id}' "
+                        f"[{event.start_minute},{event.end_minute})."
+                    )
+
+
+_KYORUGI_ROUND_ORDER = (
+    "preliminary",
+    "round_of_64",
+    "round_of_32",
+    "round_of_16",
+    "quarterfinal",
+    "semifinal",
+    "final",
+)
+
+
+def _round_rank(round_name: str) -> int | None:
+    name = (round_name or "").lower().replace(" ", "_")
+    for idx, label in enumerate(_KYORUGI_ROUND_ORDER):
+        if label in name:
+            return idx
+    return None
+
+
+def _validate_bracket_round_precedence(
+    tournament: Tournament,
+    schedule: list[RingSchedule],
+    errors: list[str],
+) -> None:
+    """No final before semifinal; no semifinal before preliminaries/quarterfinals; etc."""
+    for division in tournament.divisions:
+        try:
+            detail = build_division_detail(
+                tournament=tournament,
+                schedule=schedule,
+                division_id=division.id,
+                current_minute=0,
+            )
+        except (KeyError, ValueError):
+            continue
+
+        round_windows: dict[str, tuple[int, int]] = {}
+        for match in detail.bracket.matches:
+            cur = round_windows.get(match.round_name)
+            if cur is None:
+                round_windows[match.round_name] = (match.start_minute, match.end_minute)
+            else:
+                round_windows[match.round_name] = (
+                    min(cur[0], match.start_minute),
+                    max(cur[1], match.end_minute),
+                )
+        ranked = []
+        for round_name, (start, end) in round_windows.items():
+            rank = _round_rank(round_name)
+            if rank is not None:
+                ranked.append((rank, round_name, start, end))
+        ranked.sort(key=lambda row: row[0])
+        for left_idx in range(len(ranked)):
+            left_rank, left_name, _, left_end = ranked[left_idx]
+            for right_idx in range(left_idx + 1, len(ranked)):
+                right_rank, right_name, right_start, _ = ranked[right_idx]
+                if right_rank > left_rank and right_start < left_end:
+                    errors.append(
+                        f"{division.id}: bracket round precedence violation: "
+                        f"{right_name} starts T+{right_start} before {left_name} ends T+{left_end}."
+                    )
+
+
 def _validate_live_operations_hints(tournament: Tournament, schedule: list[RingSchedule], warnings: list[str]) -> None:
     ls = getattr(tournament, "lunch_start_minute", 180)
     grace_cut = ls + getattr(tournament, "lunch_grace_minutes", 20)
@@ -196,6 +372,14 @@ def _validate_live_operations_hints(tournament: Tournament, schedule: list[RingS
     for ring_row in schedule:
         evts = sorted(ring_row.events or [], key=lambda event: event.start_minute)
         first_starts_ring[ring_row.ring_id] = evts[0].start_minute if evts else None
+
+        for left, right in zip(evts, evts[1:]):
+            gap = right.start_minute - left.end_minute
+            if gap >= 45:
+                warnings.append(
+                    f"Large idle gap on {ring_row.ring_name}: {gap} minutes between '{left.division_name}' "
+                    f"ending T+{left.end_minute} and '{right.division_name}' starting T+{right.start_minute}."
+                )
 
         for evt in evts:
             crossover = evt.start_minute < ls and evt.end_minute > grace_cut

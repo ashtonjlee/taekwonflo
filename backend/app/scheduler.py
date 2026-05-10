@@ -177,18 +177,26 @@ def build_optimized_schedule(tournament: Tournament, solver_time_limit_seconds: 
 
     ring_first_floor: list[cp_model.IntVar] = []
     ring_used_flag: list[cp_model.BoolVar] = []
+    ring_idle_terms: list[cp_model.IntVar] = []
 
     for ri in range(num_rings):
         pseudo_vals = []
+        pseudo_end_vals = []
         for ei in range(num_events):
             ps = model.NewIntVar(0, horizon + 900, f"pseudo_r{ri}_e{ei}")
+            pe = model.NewIntVar(0, horizon + 900, f"pseudo_end_r{ri}_e{ei}")
             flag_ring = evt_vars[ei].ring_is_assigned[ri]
             model.Add(ps == evt_vars[ei].start).OnlyEnforceIf(flag_ring)
             model.Add(ps == horizon + 380).OnlyEnforceIf(flag_ring.Not())
+            model.Add(pe == evt_vars[ei].end).OnlyEnforceIf(flag_ring)
+            model.Add(pe == 0).OnlyEnforceIf(flag_ring.Not())
             pseudo_vals.append(ps)
+            pseudo_end_vals.append(pe)
 
         ring_min_start = model.NewIntVar(0, horizon + 900, f"ring_min_start_{ri}")
         model.AddMinEquality(ring_min_start, pseudo_vals)
+        ring_max_end = model.NewIntVar(0, horizon + 900, f"ring_max_end_{ri}")
+        model.AddMaxEquality(ring_max_end, pseudo_end_vals)
 
         used_here = model.NewBoolVar(f"ring_used_flag_{ri}")
         ring_used_flag.append(used_here)
@@ -200,6 +208,15 @@ def build_optimized_schedule(tournament: Tournament, solver_time_limit_seconds: 
         model.Add(ff == ring_min_start).OnlyEnforceIf(used_here)
         model.Add(ff == 0).OnlyEnforceIf(used_here.Not())
         ring_first_floor.append(ff)
+
+        ring_span = model.NewIntVar(0, horizon + 900, f"ring_span_{ri}")
+        model.Add(ring_span == ring_max_end - ring_min_start).OnlyEnforceIf(used_here)
+        model.Add(ring_span == 0).OnlyEnforceIf(used_here.Not())
+        ring_workload = sum(evt_vars[e].duration * evt_vars[e].ring_is_assigned[ri] for e in range(num_events))
+        ring_idle = model.NewIntVar(0, horizon + 900, f"ring_idle_{ri}")
+        model.Add(ring_idle == ring_span - ring_workload).OnlyEnforceIf(used_here)
+        model.Add(ring_idle == 0).OnlyEnforceIf(used_here.Not())
+        ring_idle_terms.append(ring_idle)
 
     latest_parallel_start = model.NewIntVar(0, horizon + 900, "latest_ring_first_floor")
     model.AddMaxEquality(latest_parallel_start, ring_first_floor)
@@ -220,6 +237,9 @@ def build_optimized_schedule(tournament: Tournament, solver_time_limit_seconds: 
         model.Add(workload_imbalance == sum(workload_gaps))
     else:
         model.Add(workload_imbalance == 0)
+
+    ring_idle_total = model.NewIntVar(0, (horizon + 900) * max(1, num_rings), "ring_idle_total")
+    model.Add(ring_idle_total == sum(ring_idle_terms))
 
     starts_sum_terms = []
     for ei in range(num_events):
@@ -287,6 +307,7 @@ def build_optimized_schedule(tournament: Tournament, solver_time_limit_seconds: 
         + utilization_miss * 9_350_000
         + lunch_cost * 62_500
         + latest_parallel_start * 1_975_000
+        + ring_idle_total * 52_000
         + workload_imbalance * 880
         + starts_sum_linear * 2_010
     )

@@ -42,6 +42,7 @@ export default function TimelineComparison({
   refereeAdjustments = [],
   coordinationBoard = null,
   repairMetrics = null,
+  currentMinute = 0,
   onSelectDivision,
 }) {
   const [filters, setFilters] = useState({
@@ -163,6 +164,7 @@ export default function TimelineComparison({
           span={span}
           timelineWidth={timelineWidth}
           axisTicks={axisTicks}
+          currentMinute={currentMinute}
           matchesFilters={matchesFilters}
           onBarClick={handleBarClick}
           variant="original"
@@ -176,6 +178,7 @@ export default function TimelineComparison({
           span={span}
           timelineWidth={timelineWidth}
           axisTicks={axisTicks}
+          currentMinute={currentMinute}
           matchesFilters={matchesFilters}
           onBarClick={handleBarClick}
           variant="updated"
@@ -194,6 +197,7 @@ function GanttChart({
   span,
   timelineWidth,
   axisTicks,
+  currentMinute,
   matchesFilters,
   onBarClick,
   variant,
@@ -218,6 +222,7 @@ function GanttChart({
                   <div className="pt-3 text-xs font-semibold text-slate-700">{ring.ring_name || ring.ring_id}</div>
                   <div className="relative min-h-[3.75rem] rounded-md border border-slate-200 bg-white">
                     <GridLines minMinute={minMinute} span={span} ticks={axisTicks} />
+                    <CurrentTimeMarker minMinute={minMinute} span={span} currentMinute={currentMinute} />
                     {visibleEvents.length === 0 ? (
                       <div className="relative z-10 px-3 py-4 text-xs text-slate-400">No events match filters</div>
                     ) : (
@@ -301,6 +306,18 @@ function GridLines({ minMinute, span, ticks }) {
           />
         )
       })}
+    </div>
+  )
+}
+
+function CurrentTimeMarker({ minMinute, span, currentMinute }) {
+  const left = ((currentMinute - minMinute) / span) * 100
+  if (left < 0 || left > 100) return null
+  return (
+    <div className="pointer-events-none absolute top-0 z-20 h-full border-l-2 border-rose-500" style={{ left: `${left}%` }}>
+      <span className="absolute -top-5 -translate-x-1/2 rounded bg-rose-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+        now
+      </span>
     </div>
   )
 }

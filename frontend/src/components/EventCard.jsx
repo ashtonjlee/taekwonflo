@@ -1,4 +1,4 @@
-import { formatDuration, formatMinuteRange, formatTournamentMinute, getEventStatus } from '../utils/timeline'
+import { formatDuration, formatMinuteAsClock, formatMinuteRange, formatTournamentMinute, getEventStatus } from '../utils/timeline'
 
 export default function EventCard({
   event,
@@ -46,7 +46,13 @@ export default function EventCard({
       changeLines.push(`Moved: ${changeInfo.original_ring_id} -> ${changeInfo.new_ring_id}`)
     }
     if (changeInfo.original_start_minute !== changeInfo.new_start_minute) {
-      changeLines.push(`Start changed: T+${changeInfo.original_start_minute} -> T+${changeInfo.new_start_minute}`)
+      const delay = Number(changeInfo.new_start_minute) - Number(changeInfo.original_start_minute)
+      changeLines.push(
+        `Delayed: ${formatMinuteAsClock(Number(changeInfo.original_start_minute), tournamentStartTime)} -> ${formatMinuteAsClock(Number(changeInfo.new_start_minute), tournamentStartTime)} (${delay >= 0 ? '+' : ''}${delay} min)`,
+      )
+      if (delay >= 90) {
+        changeLines.push('Large delay; check whether global reschedule cascaded too far.')
+      }
     }
     if (
       changeInfo.original_referee_crew_id !== changeInfo.new_referee_crew_id ||

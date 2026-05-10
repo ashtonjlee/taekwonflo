@@ -65,6 +65,7 @@ rules allow, while finals may consolidate for operational clarity.
 
 - A match **cannot start** until **all required feeder matches** are **completed** (or handled as byes).
 - A **final** cannot start until **both semifinal winners** are known.
+- Bracket precedence is a **hard correctness rule** in initial schedules, emergency reschedules, and local repair. A final may not be moved before its semifinals; semifinals may not be moved before preliminaries/quarterfinals.
 - UI and API for **future** bracket slots must show placeholders such as **`Winner of Match X`**, not fabricated athlete names.
 - **Losers do not advance** in single-elimination kyorugi.
 - **Byes** are modeled as **automatic advancement** into the next slot without requiring a contested bout.
@@ -155,6 +156,9 @@ Prefer the **smallest** change that restores feasibility:
 **Medical pause**
 
 - Pause the **affected ring** (or relevant window).
+- Default pause duration is **5 minutes** for demo/manual operations.
+- The affected ring loses that time. Future work originally queued on the ring must shift by at least the pause duration unless it is legally moved elsewhere by repair/reschedule.
+- Summaries should show affected ring, pause start/end, delayed matches, and old start → new start.
 - Resume after the delay; **avoid** moving an entire division unless necessary.
 
 **Referee shortage**

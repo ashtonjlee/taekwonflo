@@ -3,9 +3,11 @@ import {
   getDivisionDetail,
   getHealth,
   getMockTournamentSnapshot,
+  importCsvTournament,
   getRepairDemo,
   getRescheduleDemo,
   getValidationSnapshot,
+  postDivisionDetail,
   postLiveOperations,
 } from './api'
 import TournamentSetup from './components/TournamentSetup'
@@ -16,6 +18,8 @@ import NotificationsPanel from './components/NotificationsPanel'
 import DivisionDetailPanel from './components/DivisionDetailPanel'
 import LiveReportsSection from './components/LiveReportsSection'
 import TimelineComparison from './components/TimelineComparison'
+import CsvUploadPanel from './components/CsvUploadPanel'
+import LiveDemoControls, { shouldTriggerRandomDelay } from './components/LiveDemoControls'
 
 function App() {
   const [health, setHealth] = useState({ status: 'loading' })
@@ -44,6 +48,8 @@ function App() {
   const [scheduleChangeDetails, setScheduleChangeDetails] = useState([])
   const [refereeAdjustments, setRefereeAdjustments] = useState([])
   const [ringOperationalHints, setRingOperationalHints] = useState({})
+  const [liveMinute, setLiveMinute] = useState(0)
+  const [eventLog, setEventLog] = useState([])
 
   function toggleRingExpanded(ringId) {
     setExpandedRingIds((prev) => {
@@ -66,7 +72,7 @@ function App() {
         tournament,
         schedule: currentSchedule,
         original_schedule: originalSchedule,
-        current_minute: minuteHint ?? emergencySummary?.current_minute ?? 0,
+        current_minute: minuteHint ?? liveMinute,
         changed_events: changedEvents,
       })
       setCoordinationBoard(bucket.coordination_board || null)
@@ -102,9 +108,10 @@ function App() {
         changedEvent?.new_ring_id ||
         changedEvent?.new_referee_crew_id ||
         'auto-selected impactful event',
-      current_minute: formValues.current_minute,
+      current_minute: formValues.current_minute ?? liveMinute,
       duration_minutes: formValues.delay_minutes,
     })
+    setLiveMinute(formValues.current_minute ?? liveMinute)
   }
 
   async function handleEmergencySimulation(formValues) {
@@ -124,6 +131,106 @@ function App() {
     } finally {
       setLoadingEmergency(false)
     }
+  }
+
+  async function handleImportCsv(file) {
+    const response = await importCsvTournament(file)
+    setTournament(response.tournament)
+    setOriginalSchedule(response.schedule)
+    setCurrentSchedule(response.schedule)
+    setChangedEvents([])
+    setNotifications(response.notifications || [])
+    setValidation(null)
+    setEmergencySummary(null)
+    setLiveMinute(0)
+    setEventLog([{ id: `csv-${Date.now()}`, text: `CSV imported: ${response.preview?.athlete_count || 0} athletes, ${response.preview?.division_count || 0} divisions.` }])
+    return response
+  }
+
+  async function injectLiveDelay(type, minute, random = false) {
+    // Random delays must only happen at the current live tick — never inject in the past.
+    const safeMinute = Math.max(minute, liveMinute)
+    const params = {
+      emergency_type: type,
+      current_minute: safeMinute,
+      delay_minutes: type === 'medical_delay' ? 5 : type === 'coach_conflict' ? 5 : 20,
+      pause_duration_minutes: type === 'medical_delay' ? 5 : undefined,
+    }
+    if (type === 'medical_delay') {
+      params.ring_id = currentSchedule.find((ring) => (ring.events || []).some((event) => event.start_minute <= safeMinute && safeMinute < event.end_minute))?.ring_id || currentSchedule[0]?.ring_id
+    }
+    const response =
+      type === 'coach_conflict'
+        ? await getRepairDemo({
+            emergency_type: 'coach_conflict',
+            current_minute: safeMinute,
+            delay_minutes: 5,
+          })
+        : await getRescheduleDemo(params)
+    if (type === 'coach_conflict') {
+      setOriginalSchedule(response.original_schedule)
+      setCurrentSchedule(response.repaired_schedule)
+      setChangedEvents(response.changed_events || [])
+      setEmergencySummary({
+        emergency_type: 'coach_conflict',
+        affectedResource: response.resource_locations?.[0]?.resource_id || 'auto-selected coach',
+        current_minute: response.current_minute ?? safeMinute,
+        duration_minutes: 5,
+      })
+      setRepairMetrics({
+        changed_match_count: response.changed_match_count ?? response.changed_events?.length ?? 0,
+        average_delay_minutes: response.average_delay_minutes ?? 0,
+        max_delay_minutes: response.max_delay_minutes ?? 0,
+        repair_strategy_used: response.repair_strategy_used,
+        queue_repair_applied: Boolean(response.queue_repair_applied),
+        local_swap_used: Boolean(response.local_swap_used),
+        global_reschedule_used: Boolean(response.global_reschedule_used),
+        explanation: response.explanation || '',
+      })
+    } else {
+      applyRescheduleResponse(response, params)
+    }
+    setValidation(response.validation)
+    setScheduleChangeDetails(response.schedule_changes || [])
+    setRefereeAdjustments(response.referee_adjustments || [])
+    setCoordinationBoard(response.coordination_board || null)
+    const explanationSuffix = response.explanation ? ` — ${response.explanation}` : ''
+    setEventLog((prev) => [
+      {
+        id: `delay-${Date.now()}`,
+        text: `${random ? 'Random' : 'Manual'} ${type.replaceAll('_', ' ')} at T+${safeMinute}: ${(response.changed_events || []).length} schedule change(s), ${(response.referee_adjustments || []).length} referee adjustment(s).${explanationSuffix}`,
+      },
+      ...prev,
+    ])
+  }
+
+  function handleLiveReset() {
+    setLiveMinute(0)
+    setCurrentSchedule(originalSchedule)
+    setChangedEvents([])
+    setScheduleChangeDetails([])
+    setRefereeAdjustments([])
+    setEmergencySummary(null)
+    setRepairMetrics(null)
+    setCoordinationBoard(null)
+    setRingOperationalHints({})
+    setEventLog([])
+    setDivisionDetail(null)
+    setDivisionDetailError(null)
+    setDivisionResourceLocations([])
+  }
+
+  function handleAdvanceLiveTime(stepMinutes, randomDelayEnabled = false) {
+    const nextMinute = Math.min(480, liveMinute + stepMinutes)
+    setLiveMinute(nextMinute)
+    if (randomDelayEnabled && nextMinute > liveMinute) {
+      const delayType = shouldTriggerRandomDelay(nextMinute, liveMinute)
+      if (delayType) {
+        // Random delays must only fire at the current advance window, never in the past.
+        void injectLiveDelay(delayType, nextMinute, true)
+      }
+    }
+    return nextMinute
   }
 
   async function handleRunDemo(demoKey) {
@@ -167,6 +274,7 @@ function App() {
           current_minute: response.current_minute ?? 0,
           duration_minutes: 20,
         })
+        setLiveMinute(response.current_minute ?? 0)
         setDemoResult(buildRepairDemoExplanation(response))
         return
       }
@@ -176,9 +284,9 @@ function App() {
           ? {
               emergency_type: 'medical_delay',
               current_minute: 60,
-              delay_minutes: 20,
+              delay_minutes: 5,
               ring_id: 'ring-1',
-              pause_duration_minutes: 20,
+              pause_duration_minutes: 5,
             }
           : {
               emergency_type: 'referee_shortage',
@@ -269,18 +377,33 @@ function App() {
     const changedEventsCount = response.changed_events?.length || 0
     const validationPassed = response.validation?.valid !== false
     const strategyText = {
+      same_division_adjacent_swap: 'same-division adjacent swap',
+      same_division_next_ready_swap: 'same-division next-ready swap',
       same_division_match_swap: 'same-division match swap',
       same_ring_match_swap: 'same-ring match swap',
+      small_local_wait: 'small local wait',
       local_shift: 'local ring shift',
       global_reschedule: 'global reschedule fallback',
       infeasible: 'infeasible',
     }[strategy] || strategy
     const fallbackText =
       strategy === 'global_reschedule'
-        ? 'No eligible same-division or same-ring match could run safely, so the system fell back to the existing global rescheduler.'
+        ? 'No eligible local swap or small wait was possible, so the system fell back to the global rescheduler.'
         : strategy === 'infeasible'
           ? 'No eligible match swap or fallback repair was possible for the selected coach delay.'
           : null
+
+    const whyStrategy = response.explanation || (
+      strategy === 'same_division_adjacent_swap'
+        ? 'The very next match in the same division round was ready, so the two were swapped with no other changes.'
+        : strategy === 'same_division_next_ready_swap'
+          ? 'The next ready match within a small same-division window was promoted while the blocked match waits.'
+          : strategy === 'small_local_wait'
+            ? 'Coach delay was small, so the affected match waited locally instead of triggering a global reschedule.'
+            : strategy === 'same_division_match_swap'
+              ? 'The next eligible match in the same division had known bracket dependencies and available resources.'
+              : fallbackText || 'The system used the first valid fallback that preserved resource constraints.'
+    )
 
     return {
       title: 'Coach delayed demo complete',
@@ -291,16 +414,21 @@ function App() {
         averageDelayMinutes: response.average_delay_minutes ?? 0,
         maxDelayMinutes: response.max_delay_minutes ?? 0,
         queueRepairApplied: Boolean(response.queue_repair_applied),
+        localSwapUsed: Boolean(response.local_swap_used),
+        globalRescheduleUsed: Boolean(response.global_reschedule_used),
       },
-      whatHappened: 'An auto-selected coach was delayed, so the repair layer checked whether another match could run first.',
+      whatHappened:
+        response.explanation ||
+        'An auto-selected coach was delayed, so the repair layer checked whether another match could run first.',
       whatChanged:
         changedMatches > 0
-          ? `${changedMatches} match records changed. ${response.replacement_match?.match_id || 'A replacement match'} was inserted while the blocked match waits.`
-          : `${changedEventsCount} scheduled event${changedEventsCount === 1 ? '' : 's'} changed after match-level repair was not available.`,
-      whyStrategy:
-        strategy === 'same_division_match_swap'
-          ? 'The next eligible match in the same division had known bracket dependencies and available athletes, coaches, referees, and ring time.'
-          : fallbackText || 'The system used the first valid fallback that preserved resource constraints.',
+          ? `${changedMatches} match record${changedMatches === 1 ? '' : 's'} changed. ${
+              response.replacement_match
+                ? `Match ${response.replacement_match.match_number} runs while Match ${response.affected_match_number ?? 'the blocked match'} waits.`
+                : 'A replacement match was inserted while the blocked match waits.'
+            }`
+          : `${changedEventsCount} scheduled event${changedEventsCount === 1 ? '' : 's'} changed.`,
+      whyStrategy,
       emptyState: fallbackText,
     }
   }
@@ -311,10 +439,18 @@ function App() {
       setDivisionDetailError(null)
       setDivisionDetail(null)
       setDivisionResourceLocations([])
-      const detail = await getDivisionDetail(event.division_id, {
-        current_minute: emergencySummary?.current_minute ?? 0,
-        focus_match_id: event.focus_match_id || undefined,
-      })
+      const detail =
+        tournament && currentSchedule.length
+          ? await postDivisionDetail(event.division_id, {
+              tournament,
+              schedule: currentSchedule,
+              current_minute: liveMinute,
+              focus_match_id: event.focus_match_id || event.match_id || undefined,
+            })
+          : await getDivisionDetail(event.division_id, {
+              current_minute: liveMinute,
+              focus_match_id: event.focus_match_id || event.match_id || undefined,
+            })
       setDivisionDetail(detail)
     } catch (detailError) {
       setDivisionDetailError(detailError.message)
@@ -355,12 +491,15 @@ function App() {
         setNotifications(snapshot.notifications)
         setValidation(validationResult)
         setEmergencySummary(null)
+        setLiveMinute(0)
         setError(null)
         setScheduleChangeDetails([])
         setRefereeAdjustments([])
         setCoordinationBoard(null)
         setRingOperationalHints({})
         setRepairMetrics(null)
+        setLiveMinute(0)
+        setEventLog([])
       } catch (loadError) {
         if (isActive) {
           setError(loadError.message)
@@ -376,8 +515,32 @@ function App() {
   }, [])
 
   useEffect(() => {
-    void hydrateLiveSignals(emergencySummary?.current_minute)
-  }, [tournament, currentSchedule, originalSchedule, emergencySummary?.current_minute, changedEvents])
+    void hydrateLiveSignals(liveMinute)
+  }, [tournament, currentSchedule, originalSchedule, liveMinute, changedEvents])
+
+  const liveEmergencySummary = {
+    ...(emergencySummary || {}),
+    current_minute: liveMinute,
+  }
+
+  const longOpStage =
+    loadingEmergency
+      ? 'optimizing schedule'
+      : loadingDemo === 'coach_delayed'
+        ? 'optimizing schedule'
+        : loadingDemo
+          ? 'optimizing schedule'
+          : null
+  const longOpLabel =
+    loadingEmergency
+      ? 'Reschedule demo running'
+      : loadingDemo === 'coach_delayed'
+        ? 'Coach delay repair running'
+        : loadingDemo === 'medical_pause'
+          ? 'Medical pause demo running'
+          : loadingDemo === 'referee_shortage'
+            ? 'Referee shortage demo running'
+            : null
 
   return (
     <div className="min-h-screen p-6">
@@ -392,8 +555,10 @@ function App() {
             <span className="font-semibold text-blue-700">{health.status}</span>
           </div>
         </header>
+        {longOpLabel ? <LongOpProgress label={longOpLabel} stage={longOpStage} /> : null}
 
         <TournamentSetup snapshot={{ tournament }} />
+        <CsvUploadPanel onImportCsv={handleImportCsv} />
         <DemoModePanel
           tournament={tournament}
           schedule={currentSchedule}
@@ -413,7 +578,7 @@ function App() {
               currentSchedule={currentSchedule}
               changedEvents={changedEvents}
               validation={validation}
-              emergencySummary={emergencySummary}
+              emergencySummary={liveEmergencySummary}
               onSelectDivision={handleSelectDivision}
               expandedRingIds={expandedRingIds}
               onToggleRing={toggleRingExpanded}
@@ -433,13 +598,22 @@ function App() {
             originalSchedule={originalSchedule}
             currentSchedule={currentSchedule}
             changedEvents={changedEvents}
-            emergencySummary={emergencySummary}
+            emergencySummary={liveEmergencySummary}
             refereeAdjustments={refereeAdjustments}
             coordinationBoard={coordinationBoard}
             repairMetrics={repairMetrics}
+            currentMinute={liveMinute}
             onSelectDivision={handleSelectDivision}
           />
         )}
+        <LiveDemoControls
+          currentMinute={liveMinute}
+          onSetMinute={setLiveMinute}
+          onAdvanceTime={handleAdvanceLiveTime}
+          onReset={handleLiveReset}
+          onInjectDelay={injectLiveDelay}
+          eventLog={eventLog}
+        />
         <EmergencyControls
           tournament={tournament}
           onSimulate={handleEmergencySimulation}
@@ -455,6 +629,40 @@ function App() {
         resourceLocations={divisionResourceLocations}
         onClose={handleCloseDivisionDetail}
       />
+    </div>
+  )
+}
+
+function LongOpProgress({ label, stage }) {
+  const stages = ['parsing data', 'building divisions', 'optimizing schedule', 'validating']
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((value) => Math.min(value + 1, stages.length - 1)), 1500)
+    return () => window.clearInterval(timer)
+  }, [])
+  const idx = Math.max(stages.indexOf(stage), tick, 0)
+  const pct = Math.round(((idx + 1) / stages.length) * 100)
+  return (
+    <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900 shadow">
+      <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wide">
+        <span>{label}</span>
+        <span>{pct}%</span>
+      </div>
+      <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-blue-100">
+        <div className="h-full rounded-full bg-blue-500 transition-all duration-500" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="mt-2 flex flex-wrap gap-2 text-xs">
+        {stages.map((entry, position) => (
+          <span
+            key={entry}
+            className={`rounded-full px-2 py-0.5 ${
+              position <= idx ? 'bg-blue-200 text-blue-900' : 'bg-white text-slate-500 border border-slate-200'
+            }`}
+          >
+            {entry}
+          </span>
+        ))}
+      </div>
     </div>
   )
 }

@@ -323,6 +323,8 @@ def _apply_emergency_constraints(
         threshold = config.current_minute + max(1, config.delay_minutes)
         for event in future_events:
             vars_for_event = future_vars[event.event_id]
+            if event.ring_id == config.ring_id:
+                model.Add(vars_for_event.start >= event.start_minute + max(1, config.delay_minutes))
             model.Add(vars_for_event.start >= threshold).OnlyEnforceIf(vars_for_event.ring_is_assigned[ring_idx])
         return
 

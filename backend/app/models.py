@@ -406,8 +406,11 @@ class RepairDemoResponse(BaseModel):
     original_schedule: list[RingSchedule]
     repaired_schedule: list[RingSchedule]
     repair_strategy_used: Literal[
+        "same_division_adjacent_swap",
+        "same_division_next_ready_swap",
         "same_division_match_swap",
         "same_ring_match_swap",
+        "small_local_wait",
         "local_shift",
         "global_reschedule",
         "infeasible",
@@ -428,6 +431,12 @@ class RepairDemoResponse(BaseModel):
     average_delay_minutes: float = 0.0
     max_delay_minutes: int = 0
     queue_repair_applied: bool = False
+    local_swap_used: bool = False
+    global_reschedule_used: bool = False
+    affected_division_id: str | None = None
+    affected_round: str | None = None
+    affected_match_number: int | None = None
+    explanation: str = ""
     demo_was_impactful: bool = True
     demo_scenario_reason: str = ""
     no_op_reason: str | None = None

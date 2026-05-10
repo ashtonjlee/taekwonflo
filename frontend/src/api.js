@@ -78,6 +78,30 @@ export async function getDivisionDetail(divisionId, params = {}) {
   return getJson(`/api/divisions/${divisionId}/detail${toQueryString(params)}`)
 }
 
+export async function postDivisionDetail(divisionId, body) {
+  return postJson(`/api/divisions/${divisionId}/detail`, body)
+}
+
 export async function getRepairDemo(params = {}) {
   return getJson(`/api/repair/demo${toQueryString(params)}`)
+}
+
+export async function importCsvTournament(file, params = {}) {
+  const form = new FormData()
+  form.append('file', file)
+  const response = await fetch(`${API_BASE}/api/import/csv${toQueryString(params)}`, {
+    method: 'POST',
+    body: form,
+  })
+  if (!response.ok) {
+    let detail = `CSV import failed: ${response.status}`
+    try {
+      const payload = await response.json()
+      if (payload?.detail) detail = payload.detail
+    } catch {
+      //
+    }
+    throw new Error(detail)
+  }
+  return response.json()
 }

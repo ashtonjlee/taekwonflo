@@ -11,14 +11,20 @@ function isAffectedRing(emergencySummary, ringId, ringName) {
   return affected === ringId || affected === ringName
 }
 
-function changeBadgesFor(changeInfo) {
+function changeBadgesFor(changeInfo, tournamentStartTime = '09:00') {
   if (!changeInfo) {
     return []
   }
   const badges = []
   const delay = Math.max(0, Number(changeInfo.new_start_minute) - Number(changeInfo.original_start_minute))
   if (delay > 0) {
-    badges.push({ label: `Delayed +${delay} min`, tone: 'amber' })
+    badges.push({
+      label: `Delayed: ${formatMinuteAsClock(Number(changeInfo.original_start_minute), tournamentStartTime)} -> ${formatMinuteAsClock(Number(changeInfo.new_start_minute), tournamentStartTime)} (+${delay} min)`,
+      tone: 'amber',
+    })
+    if (delay >= 90) {
+      badges.push({ label: 'Large delay; check cascade', tone: 'amber' })
+    }
   }
   if (changeInfo.original_ring_id && changeInfo.new_ring_id && changeInfo.original_ring_id !== changeInfo.new_ring_id) {
     badges.push({ label: `Moved ${changeInfo.original_ring_id} -> ${changeInfo.new_ring_id}`, tone: 'blue' })
@@ -48,7 +54,7 @@ function ChangeBadge({ badge }) {
 }
 
 function MatchRowCard({ row, tournamentStartTime, onSelectDivision, changeInfo = null }) {
-  const badges = changeBadgesFor(changeInfo)
+  const badges = changeBadgesFor(changeInfo, tournamentStartTime)
   return (
     <button
       type="button"
