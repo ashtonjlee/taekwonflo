@@ -11,15 +11,59 @@ function isAffectedRing(emergencySummary, ringId, ringName) {
   return affected === ringId || affected === ringName
 }
 
-function MatchRowCard({ row, tournamentStartTime, onSelectDivision }) {
+function changeBadgesFor(changeInfo) {
+  if (!changeInfo) {
+    return []
+  }
+  const badges = []
+  const delay = Math.max(0, Number(changeInfo.new_start_minute) - Number(changeInfo.original_start_minute))
+  if (delay > 0) {
+    badges.push({ label: `Delayed +${delay} min`, tone: 'amber' })
+  }
+  if (changeInfo.original_ring_id && changeInfo.new_ring_id && changeInfo.original_ring_id !== changeInfo.new_ring_id) {
+    badges.push({ label: `Moved ${changeInfo.original_ring_id} -> ${changeInfo.new_ring_id}`, tone: 'blue' })
+  }
+  if (
+    changeInfo.original_referee_crew_id &&
+    changeInfo.new_referee_crew_id &&
+    (changeInfo.original_referee_crew_id !== changeInfo.new_referee_crew_id ||
+      (changeInfo.changes || []).includes('referee_assignment_changed'))
+  ) {
+    badges.push({ label: 'Referee changed', tone: 'purple' })
+  }
+  if (badges.length === 0 || (changeInfo.changes || []).length > 0) {
+    badges.push({ label: 'Rescheduled', tone: 'slate' })
+  }
+  return badges
+}
+
+function ChangeBadge({ badge }) {
+  const className = {
+    amber: 'border-amber-300 bg-amber-100 text-amber-950',
+    blue: 'border-blue-300 bg-blue-100 text-blue-950',
+    purple: 'border-purple-300 bg-purple-100 text-purple-950',
+    slate: 'border-slate-300 bg-white text-slate-700',
+  }[badge.tone]
+  return <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${className}`}>{badge.label}</span>
+}
+
+function MatchRowCard({ row, tournamentStartTime, onSelectDivision, changeInfo = null }) {
+  const badges = changeBadgesFor(changeInfo)
   return (
     <button
       type="button"
       onClick={onSelectDivision}
-      className="w-full rounded-md border border-slate-200 bg-slate-50 p-3 text-left text-xs hover:border-blue-300 hover:bg-blue-50"
+      className={`w-full rounded-md border p-3 text-left text-xs hover:border-blue-300 hover:bg-blue-50 ${
+        badges.length > 0 ? 'border-amber-300 bg-amber-50 shadow-sm shadow-amber-100' : 'border-slate-200 bg-slate-50'
+      }`}
     >
-      <div className="font-semibold text-slate-900">
-        Match {row.match_number} · {row.division_name}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="font-semibold text-slate-900">
+          Match {row.match_number} · {row.division_name}
+        </div>
+        {badges.map((badge) => (
+          <ChangeBadge key={badge.label} badge={badge} />
+        ))}
       </div>
       <div className="mt-0.5 text-slate-700">{row.round_name}</div>
       <div className="mt-1 text-slate-700">{(row.athlete_display || []).join(' · ') || 'Entries pending'}</div>
@@ -31,7 +75,7 @@ function MatchRowCard({ row, tournamentStartTime, onSelectDivision }) {
   )
 }
 
-function MatchRowsModal({ ringName, rows, tournamentStartTime, onClose, onSelectDivision }) {
+function MatchRowsModal({ ringName, rows, tournamentStartTime, onClose, onSelectDivision, changedEventMap = {} }) {
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4">
       <div className="max-h-[85vh] w-full max-w-3xl overflow-hidden rounded-xl bg-white shadow-2xl">
@@ -51,6 +95,7 @@ function MatchRowsModal({ ringName, rows, tournamentStartTime, onClose, onSelect
               key={row.match_id}
               row={row}
               tournamentStartTime={tournamentStartTime}
+              changeInfo={changedEventMap[row.event_id] || null}
               onSelectDivision={() =>
                 onSelectDivision?.({
                   division_id: row.division_id,
@@ -279,6 +324,7 @@ export default function RingColumn({
                       key={row.match_id}
                       row={row}
                       tournamentStartTime={tournamentStartTime}
+                      changeInfo={changedEventMap[row.event_id] || null}
                       onSelectDivision={() =>
                         onSelectDivision?.({
                           division_id: row.division_id,
@@ -327,6 +373,7 @@ export default function RingColumn({
           tournamentStartTime={tournamentStartTime}
           onClose={() => setShowAllMatches(false)}
           onSelectDivision={onSelectDivision}
+          changedEventMap={changedEventMap}
         />
       ) : null}
     </div>

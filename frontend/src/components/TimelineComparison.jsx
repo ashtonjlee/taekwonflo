@@ -73,6 +73,9 @@ export default function TimelineComparison({
   const minMinute = Math.min(0, ...allEvents.map((event) => event.start_minute ?? 0))
   const maxMinute = Math.max(60, ...allEvents.map((event) => event.end_minute ?? 0))
   const span = Math.max(1, maxMinute - minMinute)
+  const pixelsPerMinute = span > 540 ? 3 : 4
+  const timelineWidth = Math.max(960, span * pixelsPerMinute)
+  const axisTicks = useMemo(() => buildAxisTicks(minMinute, maxMinute), [minMinute, maxMinute])
   const ringChanges = changedEvents.filter((event) => event.original_ring_id !== event.new_ring_id).length
   const delayRows = changedEvents.map((event) => Math.max(0, event.new_start_minute - event.original_start_minute))
   const avgDelay =
@@ -158,6 +161,8 @@ export default function TimelineComparison({
           lookups={lookups}
           minMinute={minMinute}
           span={span}
+          timelineWidth={timelineWidth}
+          axisTicks={axisTicks}
           matchesFilters={matchesFilters}
           onBarClick={handleBarClick}
           variant="original"
@@ -169,6 +174,8 @@ export default function TimelineComparison({
           lookups={lookups}
           minMinute={minMinute}
           span={span}
+          timelineWidth={timelineWidth}
+          axisTicks={axisTicks}
           matchesFilters={matchesFilters}
           onBarClick={handleBarClick}
           variant="updated"
@@ -178,42 +185,122 @@ export default function TimelineComparison({
   )
 }
 
-function GanttChart({ title, schedule, changedMap, lookups, minMinute, span, matchesFilters, onBarClick, variant }) {
+function GanttChart({
+  title,
+  schedule,
+  changedMap,
+  lookups,
+  minMinute,
+  span,
+  timelineWidth,
+  axisTicks,
+  matchesFilters,
+  onBarClick,
+  variant,
+}) {
   return (
     <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h3 className="m-0 text-sm font-semibold text-slate-950">{title}</h3>
-        <span className="text-xs font-semibold text-slate-500">Rings as rows · time left to right</span>
+        <span className="text-xs font-semibold text-slate-500">Rings as rows · horizontal scroll preserves clock scale</span>
       </div>
-      <div className="space-y-3">
-        {schedule.map((ring) => {
-          const visibleEvents = (ring.events || []).filter(matchesFilters)
-          return (
-            <div key={`${variant}-${ring.ring_id}`} className="grid grid-cols-[5rem_1fr] gap-3">
-              <div className="pt-2 text-xs font-semibold text-slate-700">{ring.ring_name || ring.ring_id}</div>
-              <div className="relative min-h-[3.25rem] rounded-md border border-slate-200 bg-white">
-                {visibleEvents.length === 0 ? (
-                  <div className="px-3 py-4 text-xs text-slate-400">No events match filters</div>
-                ) : (
-                  visibleEvents.map((event) => (
-                    <GanttBar
-                      key={`${variant}-${eventKey(event)}`}
-                      event={event}
-                      change={changedMap[event.event_id] || null}
-                      matchNumber={event.match_number || lookups.matchNumByEvent[event.event_id]}
-                      roundName={event.round_name || lookups.roundByEvent[event.event_id] || 'division block'}
-                      minMinute={minMinute}
-                      span={span}
-                      variant={variant}
-                      onClick={() => onBarClick(event)}
-                    />
-                  ))
-                )}
-              </div>
-            </div>
-          )
-        })}
+      <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+        <div className="min-w-full p-3" style={{ width: `${timelineWidth + 90}px` }}>
+          <div className="grid grid-cols-[5rem_1fr] gap-3">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Ring</div>
+            <TimeAxis minMinute={minMinute} span={span} ticks={axisTicks} />
+          </div>
+          <div className="mt-2 space-y-3">
+            {schedule.map((ring) => {
+              const visibleEvents = (ring.events || []).filter(matchesFilters)
+              return (
+                <div key={`${variant}-${ring.ring_id}`} className="grid grid-cols-[5rem_1fr] gap-3">
+                  <div className="pt-3 text-xs font-semibold text-slate-700">{ring.ring_name || ring.ring_id}</div>
+                  <div className="relative min-h-[3.75rem] rounded-md border border-slate-200 bg-white">
+                    <GridLines minMinute={minMinute} span={span} ticks={axisTicks} />
+                    {visibleEvents.length === 0 ? (
+                      <div className="relative z-10 px-3 py-4 text-xs text-slate-400">No events match filters</div>
+                    ) : (
+                      visibleEvents.map((event) => (
+                        <GanttBar
+                          key={`${variant}-${eventKey(event)}`}
+                          event={event}
+                          change={changedMap[event.event_id] || null}
+                          matchNumber={event.match_number || lookups.matchNumByEvent[event.event_id]}
+                          roundName={event.round_name || lookups.roundByEvent[event.event_id] || 'division block'}
+                          minMinute={minMinute}
+                          span={span}
+                          variant={variant}
+                          onClick={() => onBarClick(event)}
+                        />
+                      ))
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
       </div>
+    </div>
+  )
+}
+
+function buildAxisTicks(minMinute, maxMinute) {
+  const start = Math.floor(minMinute / 15) * 15
+  const end = Math.ceil(maxMinute / 15) * 15
+  const ticks = []
+  for (let minute = start; minute <= end; minute += 15) {
+    ticks.push({
+      minute,
+      major: minute % 60 === 0,
+      half: minute % 30 === 0,
+    })
+  }
+  return ticks
+}
+
+function TimeAxis({ minMinute, span, ticks }) {
+  return (
+    <div className="relative h-9 border-b border-slate-300">
+      {ticks.map((tick) => {
+        const left = ((tick.minute - minMinute) / span) * 100
+        return (
+          <div
+            key={`axis-${tick.minute}`}
+            className="absolute bottom-0 flex translate-x-[-1px] flex-col items-start"
+            style={{ left: `${left}%` }}
+          >
+            <span className={`${tick.major ? 'h-3 border-l border-slate-600' : tick.half ? 'h-2 border-l border-slate-400' : 'h-1.5 border-l border-slate-300'}`} />
+            {tick.major ? (
+              <span className="mt-1 whitespace-nowrap text-[11px] font-semibold text-slate-700">
+                {formatMinuteAsClock(tick.minute)}
+              </span>
+            ) : tick.half ? (
+              <span className="mt-1 whitespace-nowrap text-[10px] text-slate-500">{formatMinuteAsClock(tick.minute)}</span>
+            ) : null}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function GridLines({ minMinute, span, ticks }) {
+  return (
+    <div className="pointer-events-none absolute inset-0">
+      {ticks.map((tick) => {
+        const left = ((tick.minute - minMinute) / span) * 100
+        return (
+          <div
+            key={`grid-${tick.minute}`}
+            className={`absolute top-0 h-full border-l ${
+              tick.major ? 'border-slate-300' : tick.half ? 'border-slate-200' : 'border-slate-100'
+            }`}
+            style={{ left: `${left}%` }}
+          />
+        )
+      })}
     </div>
   )
 }
@@ -228,6 +315,7 @@ function GanttBar({ event, change, matchNumber, roundName, minMinute, span, vari
     `Match ${matchNumber || event.match_number || '-'}`,
     event.division_name,
     roundName,
+    event.ring_name || event.ring_id,
     formatMinuteRange(event.start_minute, event.end_minute),
     EVENT_TYPE_LABELS[event.event_type] || event.event_type,
     movedRing ? `${change.original_ring_id} -> ${change.new_ring_id}` : null,
@@ -241,7 +329,7 @@ function GanttBar({ event, change, matchNumber, roundName, minMinute, span, vari
       type="button"
       title={title}
       onClick={onClick}
-      className={`absolute top-2 h-9 overflow-hidden rounded-md border px-2 text-left text-[11px] leading-tight shadow-sm transition focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+      className={`absolute top-2 z-10 h-10 overflow-hidden rounded-md border px-2 text-left text-[11px] leading-tight shadow-sm transition focus:outline-none focus:ring-2 focus:ring-blue-500 ${
         isChanged
           ? variant === 'updated'
             ? 'border-amber-400 bg-amber-100 text-amber-950'

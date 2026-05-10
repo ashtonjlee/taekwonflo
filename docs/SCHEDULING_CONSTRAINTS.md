@@ -42,6 +42,12 @@ The **true atomic scheduling unit** is a **match** or **flight** (a schedulable 
 
 Entire divisions **do not** have to remain on a single ring.
 
+**Current MVP note:** the production target is match/flight-level assignment across rings. The present demo still publishes many
+`ScheduledEvent` rows at division-block granularity, so some divisions appear as one ring block even though bracket detail can
+show match-level queues inside that block. Until the solver is fully match-native, use the detail views and documentation as the
+source of product intent: early kyorugi rounds and large poomsae preliminaries may split across rings when resources and bracket
+rules allow, while finals may consolidate for operational clarity.
+
 **Poomsae-style example**
 
 - A large preliminary round (e.g., 60 entries) may run as **three flights** on **three rings** (~20 entries each), in parallel subject to judging and staging capacity.
@@ -62,6 +68,12 @@ Entire divisions **do not** have to remain on a single ring.
 - UI and API for **future** bracket slots must show placeholders such as **`Winner of Match X`**, not fabricated athlete names.
 - **Losers do not advance** in single-elimination kyorugi.
 - **Byes** are modeled as **automatic advancement** into the next slot without requiring a contested bout.
+
+**Unknown winners and availability:** future conditional rounds should reserve bracket slots/time windows without pretending the
+exact advancing athlete or assigned coach is known. Once feeder results are complete, live operations should update the concrete
+athlete/coach obligations and run local repair if the realized winner creates a conflict. The MVP bracket UI follows this by
+showing `Winner of Match X` placeholders for unfinished feeders. Any remaining division-block optimization is conservative and
+estimated until results are known.
 
 ---
 

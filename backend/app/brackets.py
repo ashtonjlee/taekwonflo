@@ -276,17 +276,18 @@ def _build_kyorugi_matches(
         if left_corner is None and right_corner is None:
             continue
         sequence += 1
+        match_id = f"{division.id}-ky-{rounds[0]}-{pairing // 2 + 1}"
         start_slice, stop_slice = _match_window(scheduled_event, sequence - 1, minutes_per_segment)
         duel_state = _match_status(start_slice, stop_slice, current_minute)
 
         bye_path = left_corner is None or right_corner is None
         display_one = _competitor_with_assigned_coach(
             left_corner if left_corner else right_corner,
-            match_id=f"{division.id}-ky-{rounds[0]}-{pairing // 2 + 1}",
+            match_id=match_id,
         )
         display_two = _competitor_with_assigned_coach(
             right_corner if left_corner and right_corner else None,
-            match_id=f"{division.id}-ky-{rounds[0]}-{pairing // 2 + 1}",
+            match_id=match_id,
         )
 
         victor: MatchCompetitor | None = None
@@ -294,7 +295,7 @@ def _build_kyorugi_matches(
         duel_score: MatchScore | None = None
 
         if duel_state == "completed":
-            victor = _deterministic_winner(left_corner, right_corner, sequence)
+            victor = _deterministic_winner(left_corner, right_corner, match_id=match_id, salt=sequence)
             if left_corner and right_corner:
                 fail_id = (
                     left_corner.competitor_id if victor.competitor_id == right_corner.competitor_id else right_corner.competitor_id
@@ -305,7 +306,6 @@ def _build_kyorugi_matches(
                 else MatchScore(winner_margin="bye")
             )
 
-        match_id = f"{division.id}-ky-{rounds[0]}-{pairing // 2 + 1}"
         bout = _match(
             division=division,
             scheduled_event=scheduled_event,
@@ -340,6 +340,7 @@ def _build_kyorugi_matches(
             left_feed = prior_round[offset]
             right_feed = prior_round[offset + 1]
             sequence += 1
+            match_id = f"{division.id}-ky-{label}-{offset // 2 + 1}"
             slice_start, slice_stop = _match_window(scheduled_event, sequence - 1, minutes_per_segment)
             progress = _match_status(slice_start, slice_stop, current_minute)
 
@@ -353,14 +354,15 @@ def _build_kyorugi_matches(
             score_line: MatchScore | None = None
 
             if competitors_ready and progress == "completed":
-                victor = _deterministic_winner(lw, rw, sequence + ladder_index)
+                # Mock result generation only: once both feeders are actually complete, choose a deterministic
+                # but varied winner so the demo bracket does not always advance the first listed athlete.
+                victor = _deterministic_winner(lw, rw, match_id=match_id, salt=sequence + ladder_index)
                 loser_token = lw.competitor_id if victor.competitor_id == rw.competitor_id else rw.competitor_id
                 score_line = _kyorugi_score(sequence, victor, lw, rw)
 
-            competitor_one = _competitor_with_assigned_coach(lw, match_id=f"{division.id}-ky-{label}-{offset // 2 + 1}")
-            competitor_two = _competitor_with_assigned_coach(rw, match_id=f"{division.id}-ky-{label}-{offset // 2 + 1}")
+            competitor_one = _competitor_with_assigned_coach(lw, match_id=match_id)
+            competitor_two = _competitor_with_assigned_coach(rw, match_id=match_id)
 
-            match_id = f"{division.id}-ky-{label}-{offset // 2 + 1}"
             bout = _match(
                 division=division,
                 scheduled_event=scheduled_event,
@@ -1246,6 +1248,8 @@ def _round_names_for_division(division: Division, competitor_count: int) -> list
 def _deterministic_winner(
     competitor_1: MatchCompetitor | None,
     competitor_2: MatchCompetitor | None,
+    *,
+    match_id: str,
     salt: int,
 ) -> MatchCompetitor:
     if competitor_1 and not competitor_2:
@@ -1254,7 +1258,12 @@ def _deterministic_winner(
         return competitor_2
     if not competitor_1 or not competitor_2:
         raise ValueError("A match requires at least one competitor.")
-    return competitor_1 if (competitor_1.seed + salt) % 3 != 0 else competitor_2
+    # Mock result generation only, not a prediction model. Use match id and competitor ids so the same
+    # tournament seed is repeatable while completed winners vary across the bracket.
+    token = f"{match_id}:{competitor_1.competitor_id}:{competitor_2.competitor_id}:{salt}"
+    hashed = sum((idx + 1) * ord(ch) for idx, ch in enumerate(token))
+    seed_bias = competitor_2.seed - competitor_1.seed
+    return competitor_1 if (hashed + seed_bias) % 5 in {0, 1, 3} else competitor_2
 
 
 def _match_window(scheduled_event: ScheduledEvent, match_offset: int, minutes_per_match: int) -> tuple[int, int]:

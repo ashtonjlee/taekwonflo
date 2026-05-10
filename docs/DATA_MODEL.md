@@ -67,6 +67,12 @@ Each `Match` includes:
 - ranked and pair/team lanes: `participant_athlete_ids` lists athletes on that performance slot (when not represented as two sides)
 - `repair_note`, `swapped_from_match_id` when local repair modifies queue order
 
+For future kyorugi rounds, unresolved feeders remain placeholders rather than fabricated athletes. The MVP reserves the future
+round window but should not treat unknown winners as exact hard athlete/coach obligations until feeder matches complete. Once a
+winner is known, the live availability index can resolve the actual athlete and assigned coach and local repair can respond to
+new conflicts. This is a documented conservative bridge while the scheduler moves from division-block events toward fully
+match-native conditional optimization.
+
 Division detail optionally returns **`focused_match_id`** when the client passes `focus_match_id` through `GET /api/divisions/{id}/detail?...`; the MVP UI jumps to that match card inside the bracket view.
 
 `MatchCompetitor` may include `coach_ids` and `coach_names` for roster and reporting views.
@@ -102,7 +108,20 @@ Greedy referee rostering minimizes borrowing: crews are filled from their home m
 
 ## Demo Scores
 
-Kyorugi scores are deterministic point totals. Poomsae scores are deterministic decimal scores. They are realistic enough for the live demo but are not judging logic.
+Kyorugi scores are deterministic point totals. Completed mock kyorugi winners are chosen from a seeded hash of match id and
+competitor ids, so they are repeatable for the same tournament seed but do not always advance the first listed athlete. Poomsae
+scores are deterministic decimal scores. These are realistic enough for the live demo but are not judging logic or prediction.
+
+## Multi-ring Scheduling Direction
+
+Large divisions should eventually decompose into match/flight records that can be assigned independently across rings:
+
+- 8-athlete kyorugi quarterfinals may run in parallel on multiple rings when athletes, coaches, and referees are available.
+- semifinals may run on fewer rings, and finals should wait for both feeders plus the default 5-minute advancing-athlete rest.
+- large poomsae preliminaries may split into flights across rings, with later rounds consolidated when useful.
+
+Current API payloads still include division-level `ScheduledEvent` blocks in several paths. Those blocks are a compatibility
+surface for the demo UI, not a rule that a real division must stay on one ring.
 
 ## Timing Assumptions
 

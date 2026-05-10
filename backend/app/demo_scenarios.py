@@ -6,6 +6,7 @@ from .availability import coach_ids_for_match
 from .brackets import build_division_detail
 from .models import RingSchedule, Tournament
 from .rescheduler import EmergencyConfig, RescheduleError, reoptimize_future_events
+from .schedule_ops import assign_referees_to_schedule
 
 
 @dataclass(frozen=True)
@@ -142,17 +143,19 @@ def _find_referee_shortage_scenario(
     default_delay_minutes: int,
 ) -> DemoScenario:
     crew_by_id = {crew.id: crew for crew in tournament.referee_crews}
-    future_events = [event for event in _all_events(original_schedule) if event.start_minute > 0]
+    assigned_schedule = assign_referees_to_schedule(tournament, original_schedule) if tournament.referees else original_schedule
+    future_events = [event for event in _all_events(assigned_schedule) if event.start_minute > 0]
     future_events.sort(key=lambda event: (-event.required_referee_count, event.start_minute, event.event_id))
 
     for affected in future_events:
+        if not affected.assigned_referee_ids or len(affected.assigned_referee_ids) < affected.required_referee_count:
+            continue
         current = max(0, affected.start_minute - 2)
         duration = max(default_delay_minutes, min(30, affected.end_minute - affected.start_minute + 2))
         crew = crew_by_id.get(affected.referee_crew_id)
         if not crew:
             continue
-        unavailable_ref_count = 2 if affected.required_referee_count >= 5 and len(crew.referee_ids) >= 2 else 1
-        unavailable_ref_ids = sorted(crew.referee_ids)[:unavailable_ref_count]
+        unavailable_ref_ids = [sorted(affected.assigned_referee_ids)[0]]
         config = EmergencyConfig(
             emergency_type="referee_shortage",
             current_minute=current,
@@ -185,8 +188,8 @@ def _find_referee_shortage_scenario(
                 unavailable_referee_ids=unavailable_ref_ids,
                 affected_event_id=affected.event_id,
                 reason=(
-                    f"Targets high-official event {affected.event_id} ({affected.required_referee_count} refs) and "
-                    f"temporarily removes {len(unavailable_ref_ids)} officials from {affected.referee_crew_name}."
+                    f"Targets event {affected.event_id}, which has exactly assigned officials for a "
+                    f"{affected.required_referee_count}-referee slot, and removes one assigned referee."
                 ),
             )
 

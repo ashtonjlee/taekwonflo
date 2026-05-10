@@ -184,7 +184,6 @@ function App() {
               emergency_type: 'referee_shortage',
               current_minute: 60,
               delay_minutes: 20,
-              referee_crew_id: 'ref-crew-1',
               unavailable_duration_minutes: 20,
             }
       const [response, snapshot] = await Promise.all([
@@ -218,7 +217,7 @@ function App() {
         whatChanged:
           changedCount > 0
             ? `${changedCount} future event${changedCount === 1 ? '' : 's'} changed, including ${delayedCount} delayed event${delayedCount === 1 ? '' : 's'}.`
-            : 'No future event needed to move for this deterministic demo window.',
+            : `${formValues.ring_id} paused for ${formValues.pause_duration_minutes || formValues.delay_minutes} minutes; current work resumed and no ring reassignment was needed.`,
         whyStrategy:
           changedCount > 0
             ? 'The existing emergency rescheduler froze completed and active work, then adjusted future events around the pause.'
@@ -229,14 +228,21 @@ function App() {
 
     return {
       title: 'Referee shortage demo complete',
-      strategyLabel: changedCount > 0 ? 'future-event reschedule' : 'no schedule movement needed',
+      strategyLabel:
+        changedCount > 0
+          ? 'future-event reschedule'
+          : response.referee_adjustments?.length
+            ? 'referee borrowing adjustment'
+            : 'no schedule movement needed',
       validationPassed,
       metrics: buildResponseMetrics(response),
-      whatHappened: `${formValues.referee_crew_id} was marked short during the demo window.`,
+      whatHappened: response.demo_scenario_reason || 'One assigned referee was marked unavailable during the demo window.',
       whatChanged:
         changedCount > 0
           ? `${changedCount} future event${changedCount === 1 ? '' : 's'} changed so the unavailable crew is not double-booked.`
-          : 'No future event needed to move for this deterministic demo window.',
+          : response.referee_adjustments?.length
+            ? `${response.referee_adjustments.length} referee assignment${response.referee_adjustments.length === 1 ? '' : 's'} changed to keep the ring staffed.`
+            : 'No future event needed to move for this deterministic demo window.',
       whyStrategy:
         changedCount > 0
           ? 'The existing rescheduler preferred valid future assignments while preserving completed and active events.'

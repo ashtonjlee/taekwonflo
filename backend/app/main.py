@@ -549,6 +549,21 @@ def reschedule_demo(
     except ScheduleError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
+    scripted_scenario = None
+    if emergency_type == "referee_shortage" and referee_crew_id is None:
+        scripted_scenario = find_impactful_demo_scenario(
+            tournament=tournament,
+            original_schedule=original_schedule,
+            emergency_type="referee_shortage",
+            default_current_minute=current_minute,
+            default_delay_minutes=delay_minutes,
+        )
+        current_minute = scripted_scenario.current_minute
+        delay_minutes = scripted_scenario.delay_minutes
+        referee_crew_id = scripted_scenario.referee_crew_id
+        unavailable_start_minute = scripted_scenario.unavailable_start_minute
+        unavailable_duration_minutes = scripted_scenario.unavailable_duration_minutes
+
     defaults = _resolve_emergency_defaults(
         emergency_type=emergency_type,
         current_minute=current_minute,
@@ -586,11 +601,25 @@ def reschedule_demo(
     except RescheduleError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
-    notifications = build_mock_notifications(rescheduled_schedule)
-    validation = validate_snapshot(tournament=tournament, schedule=rescheduled_schedule, demo_mode=True)
     baseline_schedule = assign_referees_to_schedule(tournament, original_schedule) if tournament.referees else original_schedule
+    unavailable_referee_ids = scripted_scenario.unavailable_referee_ids if scripted_scenario else []
+    unavailable_windows = {
+        referee_id: [
+            (
+                config.unavailable_start_minute,
+                config.unavailable_start_minute + max(1, config.unavailable_duration_minutes),
+            )
+        ]
+        for referee_id in unavailable_referee_ids
+    }
     hydrated_schedule = (
-        assign_referees_to_schedule(tournament, rescheduled_schedule) if tournament.referees else rescheduled_schedule
+        assign_referees_to_schedule_with_unavailability(
+            tournament,
+            rescheduled_schedule,
+            unavailable_by_referee=unavailable_windows,
+        )
+        if tournament.referees
+        else rescheduled_schedule
     )
 
     adjustment_reason = f"Emergency {emergency_type.replace('_', ' ')} reschedule"
@@ -604,7 +633,11 @@ def reschedule_demo(
         if tournament.referees
         else []
     )
+    referee_moves = [move for move in referee_moves if _is_meaningful_referee_adjustment(move)]
+    changed_events = _add_referee_assignment_change_events(changed_events, baseline_schedule, hydrated_schedule, referee_moves)
 
+    notifications = build_mock_notifications(hydrated_schedule)
+    validation = validate_snapshot(tournament=tournament, schedule=hydrated_schedule, demo_mode=True)
     enriched_changes = enrich_schedule_changes(
         tournament,
         prior_schedule=baseline_schedule,
@@ -635,4 +668,46 @@ def reschedule_demo(
         changed_match_count=changed_count,
         average_delay_minutes=average_delay,
         max_delay_minutes=max_delay,
+        demo_was_impactful=bool(changed_events or referee_moves),
+        demo_scenario_reason=scripted_scenario.reason if scripted_scenario else "",
+        no_op_reason=None if (changed_events or referee_moves) else "No schedule or referee assignment change was required.",
     )
+
+
+def _add_referee_assignment_change_events(
+    changed_events: list[ChangedEvent],
+    baseline_schedule: list[RingSchedule],
+    hydrated_schedule: list[RingSchedule],
+    referee_moves,
+) -> list[ChangedEvent]:
+    if not referee_moves:
+        return changed_events
+    existing = {row.event_id for row in changed_events}
+    baseline_by_id = {event.event_id: event for ring in baseline_schedule for event in ring.events}
+    added: list[ChangedEvent] = []
+    for move in referee_moves:
+        for ring in hydrated_schedule:
+            for event in ring.events:
+                if event.event_id in existing:
+                    continue
+                same_window = event.ring_id == move.ring_id and event.start_minute == move.window_start_minute and event.end_minute == move.window_end_minute
+                if not same_window:
+                    continue
+                original = baseline_by_id.get(event.event_id)
+                if not original:
+                    continue
+                existing.add(event.event_id)
+                added.append(
+                    ChangedEvent(
+                        event_id=event.event_id,
+                        changes=["referee_assignment_changed"],
+                        original_ring_id=original.ring_id,
+                        new_ring_id=event.ring_id,
+                        original_referee_crew_id=original.referee_crew_id,
+                        new_referee_crew_id=event.referee_crew_id,
+                        original_start_minute=original.start_minute,
+                        new_start_minute=event.start_minute,
+                    )
+                )
+                break
+    return sorted([*changed_events, *added], key=lambda row: (row.original_start_minute, row.event_id))

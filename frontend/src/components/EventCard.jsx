@@ -48,9 +48,14 @@ export default function EventCard({
     if (changeInfo.original_start_minute !== changeInfo.new_start_minute) {
       changeLines.push(`Start changed: T+${changeInfo.original_start_minute} -> T+${changeInfo.new_start_minute}`)
     }
-    if (changeInfo.original_referee_crew_id !== changeInfo.new_referee_crew_id) {
+    if (
+      changeInfo.original_referee_crew_id !== changeInfo.new_referee_crew_id ||
+      (changeInfo.changes || []).includes('referee_assignment_changed')
+    ) {
       changeLines.push(
-        `Referee changed: ${changeInfo.original_referee_crew_id} -> ${changeInfo.new_referee_crew_id}`,
+        changeInfo.original_referee_crew_id !== changeInfo.new_referee_crew_id
+          ? `Referee changed: ${changeInfo.original_referee_crew_id} -> ${changeInfo.new_referee_crew_id}`
+          : 'Referee assignment changed',
       )
     }
   }
