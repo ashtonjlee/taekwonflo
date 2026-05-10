@@ -2,7 +2,19 @@
 
 ## Current Scope
 
-TaekwonFlo schedules division-level tournament events and now exposes deterministic match/bracket detail inside each scheduled division. The optimizer still assigns one scheduled event per division; match-level timing is derived from that scheduled event for live operations views. The default demo simulates a large 5-ring, roughly 61-division WT/USAT-inspired tournament day.
+TaekwonFlo schedules division-level tournament events and now exposes deterministic match/bracket detail inside each scheduled division. The optimizer still assigns one scheduled event per division; match-level timing is derived from that scheduled event for live operations views. The default demo simulates a large 5-ring, roughly 61-division WT/USAT-inspired tournament day. For the **longer-term match/flight constraint model** (global match numbers, division splitting, precedence, etc.), see **`docs/SCHEDULING_CONSTRAINTS.md`**.
+
+### Initial solver behavior
+
+Primary scheduling minimizes **makespan** first, then biases toward **all rings launching near T+0** when crews and divisions suffice, smoother **ring workload balance**, fewer **idle rings**, and **soft lunch-aware** placements. Greedy feasible hints parallelize divisions across rings instead of stacking them on ring 1. Lunch is modeled softly via penalties tied to `lunch_start_minute` (default 180), `lunch_duration_minutes` (60), and `lunch_grace_minutes` (20) rather than inserting explicit blocked intervals inside CP-SAT.
+
+### Lunch UX
+
+The frontend surfaces a staggered synthetic break per ring beginning after whichever division overlaps the lunch anchor clears, lasting `lunch_duration_minutes`, so crews can finish an active bout before pausing.
+
+### Referee crews
+
+Synthetic tournaments guarantee **≥1 referee crew per ring**, each listing **3–5** referees (`referee_ids`). Division templates may demand **three** preliminary panels or **five** semifinal/final panels. Greedy referee rostering after CP-SAT fills `assigned_referee_ids` using home-crew referees before borrowing minimally from other crews.
 
 ## Hard Constraints
 

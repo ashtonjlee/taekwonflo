@@ -93,7 +93,7 @@ def generate_tournament(
         number_of_rings=max(1, number_of_rings),
         number_of_athletes=max(8, number_of_athletes, number_of_divisions * 4),
         number_of_teams=max(2, number_of_teams),
-        number_of_referee_crews=max(1, number_of_referee_crews),
+        number_of_referee_crews=max(1, max(number_of_referee_crews, number_of_rings)),
         number_of_divisions=max(1, number_of_divisions),
         target_tournament_minutes=max(120, target_tournament_minutes),
         seed=seed,
@@ -113,7 +113,8 @@ def generate_tournament(
             ["kyorugi", "judge"],
         )
         referee_ids_local: list[str] = []
-        roster_size = 3 + (crew_idx % 3)
+        roster_pattern = [3, 3, 4, 5, 5]
+        roster_size = roster_pattern[crew_idx % len(roster_pattern)]
         for slot in range(roster_size):
             rid = f"referee-{len(referees_manifest) + 1}"
             referee_ids_local.append(rid)
@@ -140,6 +141,9 @@ def generate_tournament(
         referee_crews=referee_crews,
         referees=referees_manifest,
         events=events,
+        lunch_start_minute=180,
+        lunch_duration_minutes=60,
+        lunch_grace_minutes=20,
     )
 
 

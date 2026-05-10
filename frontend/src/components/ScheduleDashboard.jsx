@@ -10,6 +10,7 @@ import {
   getStagingGroups,
   isEventInProgress,
 } from '../utils/timeline'
+import { formatLunchWindowLabel } from '../utils/lunch'
 
 function isAffectedRing(emergencySummary, ring) {
   const affected = emergencySummary?.affectedResource
@@ -70,6 +71,7 @@ export default function ScheduleDashboard({
   onToggleRing,
   ringOperationalHints = {},
   coordinationBoard = null,
+  tournament = null,
 }) {
   const { matchNumByEvent, focusMatchByEvent } = useMemo(
     () => coordinatorEventLookups(coordinationBoard),
@@ -88,7 +90,7 @@ export default function ScheduleDashboard({
   const beforeMakespan = getMakespan(originalSchedule)
   const afterMakespan = getMakespan(currentSchedule)
   const affected = emergencySummary?.affectedResource || 'N/A'
-  const currentMinute = emergencySummary?.current_minute ?? 60
+  const currentMinute = emergencySummary?.current_minute ?? 0
   const emergencyDuration = emergencySummary?.duration_minutes
   const allEvents = getScheduleEvents(currentSchedule)
   const activeEvents = allEvents.filter((event) => isEventInProgress(event, currentMinute))
@@ -151,6 +153,19 @@ export default function ScheduleDashboard({
           />
         </div>
       </div>
+
+      {tournament ? (
+        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-950 shadow-sm shadow-amber-100/70">
+          <span className="font-semibold uppercase tracking-wide text-amber-900">Lunch corridor</span>
+          <span className="ml-2 font-semibold">{formatLunchWindowLabel(tournament)}</span>
+          <span className="mx-2 text-amber-800">•</span>
+          <span>
+            Grace T+
+            {(tournament.lunch_start_minute ?? 180) + (tournament.lunch_grace_minutes ?? 20)} · rings observe staggered synthetic
+            breaks once the division overlapping lunch finishes (UI highlights “Lunch break” per ring).
+          </span>
+        </div>
+      ) : null}
 
       <div className="mt-5 grid grid-cols-1 gap-4 xl:grid-cols-[1.2fr_0.8fr]">
         <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm">
@@ -271,6 +286,7 @@ export default function ScheduleDashboard({
             validationPassed={validationPassed}
             operationalHint={ringOperationalHints?.[ring.ring_id] ?? null}
             matchHintByEventId={matchNumByEvent}
+            tournament={tournament}
           />
         ))}
       </div>

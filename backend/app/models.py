@@ -93,6 +93,9 @@ class Tournament(BaseModel):
     referee_crews: list[RefereeCrew]
     referees: list[Referee] = Field(default_factory=list)
     events: list[TournamentEvent]
+    lunch_start_minute: int = Field(default=180, ge=0)
+    lunch_duration_minutes: int = Field(default=60, ge=0)
+    lunch_grace_minutes: int = Field(default=20, ge=0)
 
 
 class ScheduledEvent(BaseModel):

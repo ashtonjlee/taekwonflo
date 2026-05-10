@@ -45,6 +45,8 @@ def validate_snapshot(tournament: Tournament, schedule: list[RingSchedule]) -> S
 
     _validate_schedule_overlaps(schedule, errors)
 
+    _validate_live_operations_hints(tournament, schedule, warnings)
+
     return SnapshotValidationResponse(valid=len(errors) == 0, errors=errors, warnings=warnings)
 
 
@@ -100,3 +102,55 @@ def _validate_schedule_overlaps(schedule: list[RingSchedule], errors: list[str])
                 errors.append(
                     f"Coach overlap between {left.event_id} and {right.event_id}: {sorted(shared_coaches)}."
                 )
+
+
+def _validate_live_operations_hints(tournament: Tournament, schedule: list[RingSchedule], warnings: list[str]) -> None:
+    ls = getattr(tournament, "lunch_start_minute", 180)
+    grace_cut = ls + getattr(tournament, "lunch_grace_minutes", 20)
+
+    first_starts_ring: dict[str, int | None] = {}
+    num_rings = len(schedule)
+
+    for ring_row in schedule:
+        evts = sorted(ring_row.events or [], key=lambda event: event.start_minute)
+        first_starts_ring[ring_row.ring_id] = evts[0].start_minute if evts else None
+
+        for evt in evts:
+            crossover = evt.start_minute < ls and evt.end_minute > grace_cut
+            if crossover:
+                warnings.append(
+                    f"Soft lunch bleed: '{evt.division_name}' on {ring_row.ring_name} spans lunch grace corridor "
+                    f"(T+{evt.start_minute}-T+{evt.end_minute})."
+                )
+
+            need = getattr(evt, "required_referee_count", 3) or 3
+            assigned = getattr(evt, "assigned_referee_ids", None)
+
+            actual_len = len(assigned or [])
+            if actual_len > 0 and actual_len < need:
+                warnings.append(
+                    f"Underscheduled officials: '{evt.division_name}' needs {need} assigned referees but only lists "
+                    f"{actual_len} after rostering passes."
+                )
+
+    num_evt = sum(len(ring.events or []) for ring in schedule)
+
+    empties = [ring.ring_id for ring in schedule if not ring.events]
+    utilize_all = len(tournament.referee_crews) >= num_rings and len(tournament.events or []) >= num_rings
+
+    if utilize_all and num_evt >= num_rings and empties:
+        warnings.append(
+            f"Unused ring(s) although crews/divisions suffice to spread workload: {', '.join(sorted(empties))}."
+        )
+
+    nonzero_first = [(rid, fst) for rid, fst in first_starts_ring.items() if fst is not None]
+    if nonzero_first:
+        earliest = min(pair[1] for pair in nonzero_first)
+        stragglers = [rid for rid, fst in nonzero_first if fst is not None and earliest == 0 and fst >= 55]
+        if stragglers:
+            warnings.append(
+                "Ring first-start disparity: "
+                + ", ".join(sorted(stragglers))
+                + " start much later than other rings despite spare referee crews.",
+            )
+

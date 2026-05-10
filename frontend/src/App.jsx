@@ -62,7 +62,7 @@ function App() {
       const bucket = await postLiveOperations({
         tournament,
         schedule: currentSchedule,
-        current_minute: minuteHint ?? emergencySummary?.current_minute ?? 60,
+        current_minute: minuteHint ?? emergencySummary?.current_minute ?? 0,
         changed_events: changedEvents,
       })
       setCoordinationBoard(bucket.coordination_board || null)
@@ -268,7 +268,7 @@ function App() {
       setDivisionDetail(null)
       setDivisionResourceLocations([])
       const detail = await getDivisionDetail(event.division_id, {
-        current_minute: emergencySummary?.current_minute ?? 60,
+        current_minute: emergencySummary?.current_minute ?? 0,
         focus_match_id: event.focus_match_id || undefined,
       })
       setDivisionDetail(detail)
@@ -368,6 +368,7 @@ function App() {
           onToggleRing={toggleRingExpanded}
           ringOperationalHints={ringOperationalHints}
           coordinationBoard={coordinationBoard}
+          tournament={tournament}
         />
         <LiveReportsSection
           coordinationBoard={coordinationBoard}

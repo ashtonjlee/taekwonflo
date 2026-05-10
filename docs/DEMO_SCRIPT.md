@@ -5,6 +5,7 @@
 1. Start the backend API.
 2. Start the Vite frontend.
 3. Confirm the dashboard shows rings (collapsed summaries by default — expand to see event cards), the staging queue, validation tiles, and the **`Live Reports`** pane (event coordinator buckets, schedule deltas, referee moves).
+4. **Narrative hook (target model):** explain that the product direction in `docs/SCHEDULING_CONSTRAINTS.md` is **match/flight-first scheduling** with **global stable match numbers** (one number for the whole day, unchanged if a bout moves ring/time) and **division splitting** (e.g., poomsae flights or parallel kyorugi quarterfinals across rings). The current MVP demo may still show **division-level** ring cards while brackets already expose **per-match** numbers and placeholders.
 
 ## Division Detail Flow
 
@@ -12,6 +13,8 @@
 2. The Division Detail panel opens.
 3. Point out the division metadata: age group, gender, weight class, and competition class.
 4. Walk the tabs — **Summary** (validation + headline current activity), **Queue** (repair notes, match numbers), **Bracket** (kyorugi columns with connector styling; placeholders read **`Winner of Match N`** until feeders complete), **Coaches** (movement sheet and roster coaches where present).
+   - **Stable match numbers:** the target rulebook is in **`docs/SCHEDULING_CONSTRAINTS.md`** §2 — a bout keeps the same **`match_number`** for the whole day even if ring or start time changes after an emergency.
+   - **Splitting divisions across rings (roadmap):** large poomsae prelims or parallel kyorugi early rounds can fan across rings, then consolidate — see **`docs/SCHEDULING_CONSTRAINTS.md`** §3.
    - Competitors and teams appear in the right column rosters as before.
    - Match statuses and scores live in Queue and Bracket tabs.
    - Advanced competitors remain in the side panel.

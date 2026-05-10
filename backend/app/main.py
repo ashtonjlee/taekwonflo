@@ -34,7 +34,7 @@ app.add_middleware(
 class LiveOperationsRequest(BaseModel):
     tournament: Tournament
     schedule: list[RingSchedule]
-    current_minute: int = Field(default=60, ge=0)
+    current_minute: int = Field(default=0, ge=0)
     changed_events: list[ChangedEvent] = Field(default_factory=list)
 
 

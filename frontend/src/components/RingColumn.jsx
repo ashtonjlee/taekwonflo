@@ -1,5 +1,6 @@
 import EventCard from './EventCard'
-import { formatMinuteAsClock, formatTournamentMinute, isEventInProgress } from '../utils/timeline'
+import { formatMinuteAsClock, formatTournamentMinute, isEventCompleted, isEventInProgress } from '../utils/timeline'
+import { ringIsInsideLunch, ringLunchSpan } from '../utils/lunch'
 
 function isAffectedRing(emergencySummary, ringId, ringName) {
   const affected = emergencySummary?.affectedResource
@@ -14,7 +15,7 @@ export default function RingColumn({
   ringName,
   events = [],
   changedEventMap = {},
-  currentMinute = 60,
+  currentMinute = 0,
   emergencySummary = null,
   onSelectDivision,
   tournamentStartTime = '09:00',
@@ -24,9 +25,20 @@ export default function RingColumn({
   validationPassed = true,
   operationalHint = null,
   matchHintByEventId = {},
+  tournament = null,
 }) {
+  const m = Number(currentMinute ?? 0)
   const sortedEvents = [...events].sort((first, second) => (first.start_minute ?? 0) - (second.start_minute ?? 0))
-  const hasInProgress = sortedEvents.some((event) => isEventInProgress(event, currentMinute))
+
+  const progEvent = sortedEvents.find((event) => isEventInProgress(event, m))
+  const nextStrict = sortedEvents.find((event) => Number(event.start_minute) > m)
+  const lunchSpan = tournament ? ringLunchSpan(sortedEvents, tournament) : null
+  const inSyntheticLunch = ringIsInsideLunch(m, lunchSpan)
+
+  const ringFinished =
+    sortedEvents.length > 0 && sortedEvents.every((event) => isEventCompleted(event, m))
+
+  const hasInProgress = Boolean(progEvent)
   const hasDelayed = events.some((event) => {
     const changeInfo = changedEventMap[event.event_id]
     return changeInfo && changeInfo.new_start_minute > changeInfo.original_start_minute
@@ -34,48 +46,27 @@ export default function RingColumn({
   const isRingEmergency = ['medical_delay', 'ring_pause'].includes(emergencySummary?.emergency_type)
   const isPaused = isRingEmergency && isAffectedRing(emergencySummary, ringId, ringName)
   const hasChangedEvents = sortedEvents.some((event) => changedEventMap[event.event_id])
-  const nextEvent = sortedEvents.find((event) => event.start_minute >= currentMinute)
-  const remainingEvents = sortedEvents.filter((event) => event.end_minute > currentMinute).length
-  const progEvent = sortedEvents.find((event) => isEventInProgress(event, currentMinute))
+  const remainingEvents = sortedEvents.filter((event) => event.end_minute > m).length
   const displayRemaining =
     operationalHint != null && typeof operationalHint.remaining_event_count === 'number'
       ? operationalHint.remaining_event_count
       : remainingEvents
+
   const opsRescheduled =
     operationalHint?.material_reschedule_count ?? operationalHint?.rescheduled_division_events ?? 0
   const opsDelayMinutes =
     typeof operationalHint?.total_delay_minutes === 'number' ? operationalHint.total_delay_minutes : null
 
-  const progMatchHint = progEvent ? matchHintByEventId[progEvent.event_id] : null
-  const resolvedNextEvt = nextEvent
-  const primaryLine = progEvent
-    ? `Current: ${progEvent.division_name || progEvent.division}${
-        progMatchHint !== undefined ? ` · Match ${progMatchHint}` : ''
-      }`
-    : (() => {
-        const nm =
-          operationalHint?.next_division_name ||
-          resolvedNextEvt?.division_name ||
-          resolvedNextEvt?.division ||
-          null
-        const mh =
-          operationalHint?.next_match_number ??
-          (resolvedNextEvt ? matchHintByEventId[resolvedNextEvt.event_id] : undefined)
-        if (nm) {
-          const prefix = operationalHint?.idle ? 'Idle · Next:' : 'Next:'
-          const clockBit =
-            resolvedNextEvt != null
-              ? ` at ${formatMinuteAsClock(resolvedNextEvt.start_minute, tournamentStartTime)}`
-              : ''
-          const matchBit =
-            mh !== undefined && mh !== null ? ` · Match ${mh}` : ''
-          return `${prefix} ${nm}${matchBit}${clockBit}`
-        }
-        if (operationalHint?.idle === true || sortedEvents.length === 0) {
-          return 'Idle · No upcoming division on this ring'
-        }
-        return 'No future calls'
-      })()
+  const progMatchHint = progEvent ? matchHintByEventId[progEvent.event_id] : undefined
+  const nextMatchHint = nextStrict ? matchHintByEventId[nextStrict.event_id] : undefined
+
+  const afterLunchTag =
+    lunchSpan &&
+    nextStrict &&
+    typeof nextStrict.start_minute === 'number' &&
+    nextStrict.start_minute >= lunchSpan.segEnd
+      ? ' · after lunch corridor'
+      : ''
 
   let ringStatus = 'idle'
   let ringStatusClass = 'bg-slate-100 text-slate-700 ring-1 ring-slate-200'
@@ -85,9 +76,52 @@ export default function RingColumn({
   } else if (hasDelayed) {
     ringStatus = 'delayed'
     ringStatusClass = 'bg-rose-100 text-rose-800 ring-1 ring-rose-200'
+  } else if (inSyntheticLunch && !hasInProgress && !ringFinished) {
+    ringStatus = 'lunch break'
+    ringStatusClass = 'bg-amber-100 text-amber-900 ring-1 ring-amber-300'
   } else if (hasInProgress) {
     ringStatus = 'in progress'
     ringStatusClass = 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-200'
+  }
+
+  let linePrimary = ''
+  let lineSecondary = ''
+
+  if (ringFinished) {
+    linePrimary = 'Ring complete'
+    lineSecondary = ''
+  } else if (progEvent) {
+    linePrimary = `Current: ${progEvent.division_name || progEvent.division}${
+      progMatchHint !== undefined ? ` · Match ${progMatchHint}` : ''
+    }`
+    if (nextStrict) {
+      lineSecondary = `Next: ${nextStrict.division_name || nextStrict.division}${
+        nextMatchHint !== undefined ? ` · Match ${nextMatchHint}` : ''
+      } · ${formatMinuteAsClock(Number(nextStrict.start_minute), tournamentStartTime)}${afterLunchTag}`
+    } else {
+      lineSecondary = ''
+    }
+  } else if (inSyntheticLunch) {
+    linePrimary = 'Lunch break'
+    lineSecondary = nextStrict
+      ? `Resumes ${nextStrict.division_name || 'next division'} at ${formatMinuteAsClock(Number(nextStrict.start_minute), tournamentStartTime)}${
+          nextMatchHint !== undefined ? ` · Match ${nextMatchHint}` : ''
+        }${afterLunchTag}`
+      : lunchSpan != null && tournament != null
+        ? `Synthetic break clears near ${formatMinuteAsClock(Number(lunchSpan.segEnd), tournamentStartTime)}`
+        : ''
+  } else if (sortedEvents.length === 0) {
+    linePrimary = 'Idle · No assignments'
+    lineSecondary = ''
+  } else {
+    linePrimary = 'Idle'
+    if (nextStrict) {
+      lineSecondary = `Next: ${nextStrict.division_name || nextStrict.division}${
+        nextMatchHint !== undefined ? ` · Match ${nextMatchHint}` : ''
+      } · ${formatMinuteAsClock(Number(nextStrict.start_minute), tournamentStartTime)}${afterLunchTag}`
+    } else {
+      lineSecondary = ''
+    }
   }
 
   const delayBits = []
@@ -122,7 +156,10 @@ export default function RingColumn({
               {isExpanded ? 'Collapse' : 'Expand'}
             </span>
           </div>
-          <p className="mt-0.5 text-xs leading-relaxed text-slate-600">{primaryLine}</p>
+          <div className="mt-0.5 space-y-1 text-xs leading-relaxed text-slate-700">
+            <p className="m-0">{linePrimary}</p>
+            {lineSecondary ? <p className="m-0 text-[11px] text-slate-600">{lineSecondary}</p> : null}
+          </div>
           {!isExpanded ? (
             <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-600">
               <span>
@@ -172,7 +209,7 @@ export default function RingColumn({
             </div>
             <div>
               <div className="font-semibold text-slate-950">
-                {nextEvent ? formatTournamentMinute(nextEvent.start_minute) : '-'}
+                {nextStrict ? formatTournamentMinute(Number(nextStrict.start_minute)) : '-'}
               </div>
               <div>next</div>
             </div>
@@ -186,8 +223,8 @@ export default function RingColumn({
                   key={event.event_id || event.id}
                   event={event}
                   changeInfo={changedEventMap[event.event_id]}
-                  currentMinute={currentMinute}
-                  isPaused={isPaused && event.end_minute > currentMinute}
+                  currentMinute={m}
+                  isPaused={isPaused && event.end_minute > m}
                   onSelectDivision={onSelectDivision}
                   tournamentStartTime={tournamentStartTime}
                   coordinationMatchNumber={matchHintByEventId[event.event_id]}
