@@ -98,7 +98,7 @@ def _greedy_feasible_placements(tournament: Tournament, durations: list[int], ho
     return placements
 
 
-def build_optimized_schedule(tournament: Tournament, solver_time_limit_seconds: float = 5.0) -> list[RingSchedule]:
+def _build_legacy_optimized_schedule(tournament: Tournament, solver_time_limit_seconds: float = 5.0) -> list[RingSchedule]:
     if not tournament.events:
         return [RingSchedule(ring_id=ring.id, ring_name=ring.name, events=[]) for ring in tournament.rings]
     if not tournament.rings:
@@ -367,3 +367,20 @@ def _build_schedule_response(
     if tournament.referees:
         schedules = assign_referees_to_schedule(tournament, schedules)
     return schedules
+
+
+def build_optimized_schedule(tournament: Tournament, solver_time_limit_seconds: float = 5.0) -> list[RingSchedule]:
+    """
+    Prefer the experimental teammate CP-SAT scheduler when it produces a snapshot that
+    passes demo validation; otherwise fall back to the legacy division-block scheduler.
+    """
+    from .teammate_schedule_adapter import build_teammate_schedule
+    from .validation import validate_snapshot
+
+    try:
+        candidate = build_teammate_schedule(tournament, solver_time_limit_seconds=solver_time_limit_seconds)
+        if validate_snapshot(tournament, candidate, demo_mode=True).valid:
+            return candidate
+    except ScheduleError:
+        pass
+    return _build_legacy_optimized_schedule(tournament, solver_time_limit_seconds)
