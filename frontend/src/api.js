@@ -10,7 +10,28 @@ async function getJson(path) {
         detail = payload.detail
       }
     } catch {
-      // Ignore JSON parse issues and keep fallback detail text.
+      //
+    }
+    throw new Error(detail)
+  }
+  return response.json()
+}
+
+async function postJson(path, body) {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    let detail = `Request failed for ${path}: ${response.status}`
+    try {
+      const payload = await response.json()
+      if (payload?.detail) {
+        detail = payload.detail
+      }
+    } catch {
+      //
     }
     throw new Error(detail)
   }
@@ -47,4 +68,16 @@ export async function getValidationSnapshot(params = {}) {
 
 export async function getRescheduleDemo(params = {}) {
   return getJson(`/api/reschedule/demo${toQueryString(params)}`)
+}
+
+export async function postLiveOperations(body) {
+  return postJson('/api/operations/live', body)
+}
+
+export async function getDivisionDetail(divisionId, params = {}) {
+  return getJson(`/api/divisions/${divisionId}/detail${toQueryString(params)}`)
+}
+
+export async function getRepairDemo(params = {}) {
+  return getJson(`/api/repair/demo${toQueryString(params)}`)
 }
