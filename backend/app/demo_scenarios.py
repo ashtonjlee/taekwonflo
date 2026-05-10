@@ -146,8 +146,9 @@ def _find_referee_shortage_scenario(
     future_events.sort(key=lambda event: (-event.required_referee_count, event.start_minute, event.event_id))
 
     for affected in future_events:
-        current = max(0, affected.start_minute - 2)
-        duration = max(default_delay_minutes, min(30, affected.end_minute - affected.start_minute + 2))
+        window_start = affected.start_minute
+        duration = max(default_delay_minutes, affected.end_minute - window_start + 12)
+        current = max(0, window_start - 8)
         crew = crew_by_id.get(affected.referee_crew_id)
         if not crew:
             continue
@@ -160,7 +161,7 @@ def _find_referee_shortage_scenario(
             delay_minutes=default_delay_minutes,
             pause_start_minute=current,
             pause_duration_minutes=duration,
-            unavailable_start_minute=current,
+            unavailable_start_minute=window_start,
             unavailable_duration_minutes=duration,
         )
         try:
@@ -172,7 +173,7 @@ def _find_referee_shortage_scenario(
         except RescheduleError:
             continue
 
-        if changed_events or unavailable_ref_ids:
+        if changed_events:
             return DemoScenario(
                 emergency_type="referee_shortage",
                 current_minute=current,
@@ -203,6 +204,35 @@ def _find_referee_shortage_scenario(
         unavailable_referee_ids=(sorted(first_crew.referee_ids)[:1] if first_crew else []),
         reason="Fallback deterministic referee shortage scenario.",
     )
+
+
+def pick_referee_shortage_demo_params(
+    schedule: list[RingSchedule],
+    *,
+    current_minute: int,
+    delay_minutes: int,
+    referee_crew_id: str | None,
+) -> tuple[str | None, int, int, int]:
+    """
+    Choose a blackout that covers a full near-future high-official event so the global rescheduler
+    cannot leave the plan unchanged. Used when the demo client omits an explicit crew/window.
+    """
+    if referee_crew_id:
+        return referee_crew_id, current_minute, current_minute, delay_minutes
+
+    events = sorted((event for ring in schedule for event in ring.events), key=lambda row: row.start_minute)
+    candidates = [event for event in events if event.start_minute > current_minute]
+    if not candidates:
+        return None, current_minute, current_minute, delay_minutes
+
+    target = max(
+        candidates,
+        key=lambda event: (event.required_referee_count, event.end_minute - event.start_minute, event.start_minute),
+    )
+    window_start = target.start_minute
+    window_duration = max(delay_minutes, target.end_minute - window_start + 12)
+    adjusted_current = min(current_minute, max(0, window_start - 8))
+    return target.referee_crew_id, adjusted_current, window_start, window_duration
 
 
 def _find_coach_conflict_scenario(

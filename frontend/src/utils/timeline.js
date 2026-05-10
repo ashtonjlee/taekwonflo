@@ -1,3 +1,16 @@
+export function buildTimelineTicks(minMinute, maxMinute, spanMinutes) {
+  if (spanMinutes <= 0) return []
+  const minorEvery = spanMinutes <= 120 ? 10 : 15
+  const majorEvery = spanMinutes <= 240 ? 30 : 60
+  const start = Math.ceil(minMinute / minorEvery) * minorEvery
+  const ticks = []
+  for (let m = start; m <= maxMinute + minorEvery; m += minorEvery) {
+    const major = m === 0 || m % majorEvery === 0
+    ticks.push({ minute: m, major })
+  }
+  return ticks
+}
+
 export function formatMinuteAsClock(minuteOffset, tournamentStart = '09:00') {
   const [startHour, startMinute] = tournamentStart.split(':').map((value) => Number(value))
   const totalMinutes = startHour * 60 + startMinute + (Number(minuteOffset) || 0)

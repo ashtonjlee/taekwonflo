@@ -88,6 +88,11 @@ class TournamentEvent(BaseModel):
 class Tournament(BaseModel):
     id: str
     name: str
+    tournament_day_start_time: str = Field(
+        default="09:00",
+        description='Wall-clock anchor for the tournament day (UI only). Format "HH:MM" 24h, e.g. "09:00".',
+        pattern=r"^\d{1,2}:\d{2}$",
+    )
     rings: list[Ring]
     teams: list[Team]
     coaches: list[Coach]

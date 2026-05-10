@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 from collections import defaultdict
 
@@ -16,6 +17,7 @@ from .models import (
     MatchScore,
     RankedBracketEntry,
     RankedBracketRound,
+    Ring,
     RingSchedule,
     ScheduledEvent,
     Team,
@@ -69,6 +71,7 @@ def build_division_detail(
             ring_name,
             label_order,
             match_number_by_match_id=match_number_by_match_id,
+            rings=tournament.rings,
         )
         kyorugi_blocks = _assign_kyorugi_next_matches(matches, label_order)
         bracket_rounds = label_order
@@ -88,6 +91,7 @@ def build_division_detail(
             current_minute,
             ring_name,
             match_number_by_match_id=match_number_by_match_id,
+            rings=tournament.rings,
         )
         bracket_rounds = [panel.round_name for panel in ranked_blocks]
         kyorugi_losers = set()
@@ -250,6 +254,42 @@ def _seed_even_spaced_positions(fighters: list[MatchCompetitor], bracket_capacit
     return platter
 
 
+def _match_window_round_parallel(
+    scheduled_event: ScheduledEvent,
+    round_depth: int,
+    minutes_per_match: int,
+    round_gap_min: int = 5,
+) -> tuple[int, int]:
+    """Start/end shared by every match in the same kyorugi round (parallel wave)."""
+    gap = max(0, round_gap_min)
+    phase = round_depth * (minutes_per_match + gap)
+    start = scheduled_event.start_minute + phase
+    end = min(start + minutes_per_match, scheduled_event.end_minute)
+    if end <= start:
+        end = min(start + 1, scheduled_event.end_minute)
+    return start, max(start + 1, end)
+
+
+def _kyorugi_ring_assignment(
+    *,
+    ring_slots: list[Ring],
+    scheduled_event: ScheduledEvent,
+    legacy_ring_name: str,
+    round_label: str,
+    bracket_position: int,
+) -> tuple[str, str]:
+    """Spread early kyorugi across rings; consolidate finals onto ring 1."""
+    if not ring_slots:
+        return scheduled_event.ring_id, legacy_ring_name
+    if round_label == "final":
+        picked = ring_slots[0]
+    elif round_label == "semifinal":
+        picked = ring_slots[(bracket_position - 1) % min(2, len(ring_slots))]
+    else:
+        picked = ring_slots[(bracket_position - 1) % len(ring_slots)]
+    return picked.id, picked.name
+
+
 def _build_kyorugi_matches(
     division: Division,
     competitors: list[MatchCompetitor],
@@ -258,17 +298,21 @@ def _build_kyorugi_matches(
     ring_name: str,
     rounds: list[str],
     match_number_by_match_id: dict[str, int] | None = None,
+    rings: list[Ring] | None = None,
+    round_gap_minutes: int = 5,
 ) -> list[Match]:
     roster_lookup = {person.competitor_id: person for person in competitors}
     bracket_size = 1 << math.ceil(math.log2(max(2, len(competitors))))
 
     first_slots = _seed_even_spaced_positions(competitors, bracket_size)
     bouts: list[Match] = []
-    minutes_per_segment = max(6, scheduled_event.estimated_duration_minutes // max(1, bracket_size - 1))
+    ring_slots = list(rings) if rings else [Ring(id=scheduled_event.ring_id, name=ring_name)]
+    minutes_per_segment = max(6, scheduled_event.estimated_duration_minutes // max(1, len(rounds)))
     sequence = 0
     assigned_refs = list(scheduled_event.assigned_referee_ids)
 
     prior_round: list[Match] = []
+    first_label = rounds[0]
 
     for pairing in range(0, bracket_size, 2):
         left_corner = first_slots[pairing]
@@ -276,17 +320,21 @@ def _build_kyorugi_matches(
         if left_corner is None and right_corner is None:
             continue
         sequence += 1
-        start_slice, stop_slice = _match_window(scheduled_event, sequence - 1, minutes_per_segment)
+        bracket_position = (pairing // 2) + 1
+        match_id = f"{division.id}-ky-{first_label}-{bracket_position}"
+        start_slice, stop_slice = _match_window_round_parallel(
+            scheduled_event, 0, minutes_per_segment, round_gap_minutes
+        )
         duel_state = _match_status(start_slice, stop_slice, current_minute)
 
         bye_path = left_corner is None or right_corner is None
         display_one = _competitor_with_assigned_coach(
             left_corner if left_corner else right_corner,
-            match_id=f"{division.id}-ky-{rounds[0]}-{pairing // 2 + 1}",
+            match_id=match_id,
         )
         display_two = _competitor_with_assigned_coach(
             right_corner if left_corner and right_corner else None,
-            match_id=f"{division.id}-ky-{rounds[0]}-{pairing // 2 + 1}",
+            match_id=match_id,
         )
 
         victor: MatchCompetitor | None = None
@@ -294,8 +342,8 @@ def _build_kyorugi_matches(
         duel_score: MatchScore | None = None
 
         if duel_state == "completed":
-            victor = _deterministic_winner(left_corner, right_corner, sequence)
-            if left_corner and right_corner:
+            victor = _mock_kyorugi_winner(left_corner, right_corner, match_id=match_id, salt=sequence)
+            if left_corner and right_corner and victor is not None:
                 fail_id = (
                     left_corner.competitor_id if victor.competitor_id == right_corner.competitor_id else right_corner.competitor_id
                 )
@@ -305,13 +353,20 @@ def _build_kyorugi_matches(
                 else MatchScore(winner_margin="bye")
             )
 
-        match_id = f"{division.id}-ky-{rounds[0]}-{pairing // 2 + 1}"
+        rid, rnm = _kyorugi_ring_assignment(
+            ring_slots=ring_slots,
+            scheduled_event=scheduled_event,
+            legacy_ring_name=ring_name,
+            round_label=first_label,
+            bracket_position=bracket_position,
+        )
         bout = _match(
             division=division,
             scheduled_event=scheduled_event,
-            ring_name=ring_name,
-            round_name=rounds[0],
-            bracket_position=(pairing // 2) + 1,
+            ring_name=rnm,
+            ring_id=rid,
+            round_name=first_label,
+            bracket_position=bracket_position,
             competitor_1=display_one,
             competitor_2=display_two,
             winner_id=victor.competitor_id if victor is not None and duel_state == "completed" else None,
@@ -340,7 +395,11 @@ def _build_kyorugi_matches(
             left_feed = prior_round[offset]
             right_feed = prior_round[offset + 1]
             sequence += 1
-            slice_start, slice_stop = _match_window(scheduled_event, sequence - 1, minutes_per_segment)
+            bracket_position = (offset // 2) + 1
+            match_id = f"{division.id}-ky-{label}-{bracket_position}"
+            slice_start, slice_stop = _match_window_round_parallel(
+                scheduled_event, ladder_index, minutes_per_segment, round_gap_minutes
+            )
             progress = _match_status(slice_start, slice_stop, current_minute)
 
             lw = roster_lookup[left_feed.winner_id] if left_feed.winner_id and left_feed.status == "completed" else None
@@ -353,20 +412,27 @@ def _build_kyorugi_matches(
             score_line: MatchScore | None = None
 
             if competitors_ready and progress == "completed":
-                victor = _deterministic_winner(lw, rw, sequence + ladder_index)
+                victor = _mock_kyorugi_winner(lw, rw, match_id=match_id, salt=sequence + ladder_index)
                 loser_token = lw.competitor_id if victor.competitor_id == rw.competitor_id else rw.competitor_id
                 score_line = _kyorugi_score(sequence, victor, lw, rw)
 
-            competitor_one = _competitor_with_assigned_coach(lw, match_id=f"{division.id}-ky-{label}-{offset // 2 + 1}")
-            competitor_two = _competitor_with_assigned_coach(rw, match_id=f"{division.id}-ky-{label}-{offset // 2 + 1}")
+            competitor_one = _competitor_with_assigned_coach(lw, match_id=match_id)
+            competitor_two = _competitor_with_assigned_coach(rw, match_id=match_id)
 
-            match_id = f"{division.id}-ky-{label}-{offset // 2 + 1}"
+            rid, rnm = _kyorugi_ring_assignment(
+                ring_slots=ring_slots,
+                scheduled_event=scheduled_event,
+                legacy_ring_name=ring_name,
+                round_label=label,
+                bracket_position=bracket_position,
+            )
             bout = _match(
                 division=division,
                 scheduled_event=scheduled_event,
-                ring_name=ring_name,
+                ring_name=rnm,
+                ring_id=rid,
                 round_name=label,
-                bracket_position=(offset // 2) + 1,
+                bracket_position=bracket_position,
                 competitor_1=competitor_one,
                 competitor_2=competitor_two,
                 winner_id=victor.competitor_id if victor is not None and progress == "completed" else None,
@@ -455,6 +521,7 @@ def _build_ranked_rounds(
     current_minute: int,
     ring_name: str,
     match_number_by_match_id: dict[str, int] | None = None,
+    rings: list[Ring] | None = None,
 ) -> tuple[list[Match], list[RankedBracketRound]]:
     entries = build_poomsae_entries(division, tournament, team_bundle, coach_bundle)
 
@@ -468,6 +535,7 @@ def _build_ranked_rounds(
     panels_out: list[RankedBracketRound] = []
 
     ticker = 0
+    ring_slots = list(rings) if rings else [Ring(id=scheduled_segment.ring_id, name=ring_name)]
 
     for ladder_pos, milestone in enumerate(roadmap):
         finals_only = ladder_pos == len(roadmap) - 1
@@ -505,6 +573,12 @@ def _build_ranked_rounds(
             assigned_entry_coach_ids = [figurehead.assigned_coach_id] if figurehead.assigned_coach_id else []
             assigned_entry_coach_names = [figurehead.assigned_coach_name] if figurehead.assigned_coach_name else []
 
+            if ladder_pos == 0 and len(ring_slots) > 1:
+                flight_ring = ring_slots[(podium_spot - 1) % len(ring_slots)]
+                use_ring_id, use_ring_name = flight_ring.id, flight_ring.name
+            else:
+                use_ring_id, use_ring_name = scheduled_segment.ring_id, ring_name
+
             rank_rows.append(
                 RankedBracketEntry(
                     entry_id=specimen.entry_id,
@@ -531,7 +605,8 @@ def _build_ranked_rounds(
                 _match(
                     division=division,
                     scheduled_event=scheduled_segment,
-                    ring_name=ring_name,
+                    ring_name=use_ring_name,
+                    ring_id=use_ring_id,
                     round_name=milestone,
                     bracket_position=podium_spot,
                     competitor_1=figurehead,
@@ -1170,6 +1245,7 @@ def _match(
     end: int,
     match_index: int,
     required_referee_count: int,
+    ring_id: str | None = None,
     match_id_override: str | None = None,
     bye_flag: bool = False,
     participant_ids: list[str] | None = None,
@@ -1192,7 +1268,7 @@ def _match(
         score=score,
         status=status,
         scheduled_event_id=scheduled_event.event_id,
-        ring_id=scheduled_event.ring_id,
+        ring_id=ring_id if ring_id is not None else scheduled_event.ring_id,
         ring_name=ring_name,
         start_minute=start,
         end_minute=end,
@@ -1243,18 +1319,30 @@ def _round_names_for_division(division: Division, competitor_count: int) -> list
     return _round_labels_kyorugi(competitor_count)
 
 
-def _deterministic_winner(
+def _mock_kyorugi_winner(
     competitor_1: MatchCompetitor | None,
     competitor_2: MatchCompetitor | None,
+    *,
+    match_id: str,
     salt: int,
-) -> MatchCompetitor:
+) -> MatchCompetitor | None:
+    """
+    Deterministic mock winner for completed demo kyorugi only.
+
+    Uses a stable hash of ``match_id`` and both competitor ids so the same tournament seed
+    replays identically, without always advancing ``competitor_1``. This is simulation noise,
+    not a model of who would win in real competition.
+    """
     if competitor_1 and not competitor_2:
         return competitor_1
     if competitor_2 and not competitor_1:
         return competitor_2
     if not competitor_1 or not competitor_2:
-        raise ValueError("A match requires at least one competitor.")
-    return competitor_1 if (competitor_1.seed + salt) % 3 != 0 else competitor_2
+        return None
+    payload = f"{match_id}|{competitor_1.competitor_id}|{competitor_2.competitor_id}|{salt}"
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    pick_first = int(digest[:16], 16) % 2 == 0
+    return competitor_1 if pick_first else competitor_2
 
 
 def _match_window(scheduled_event: ScheduledEvent, match_offset: int, minutes_per_match: int) -> tuple[int, int]:

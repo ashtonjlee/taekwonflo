@@ -84,6 +84,7 @@ export default function ScheduleDashboard({
   originalSchedule = [],
   currentSchedule = [],
   changedEvents = [],
+  scheduleChanges = [],
   validation = null,
   emergencySummary = null,
   onSelectDivision,
@@ -93,6 +94,11 @@ export default function ScheduleDashboard({
   coordinationBoard = null,
   tournament = null,
 }) {
+  const tournamentStartTime = tournament?.tournament_day_start_time || '09:00'
+  const ringNameById = useMemo(
+    () => Object.fromEntries((tournament?.rings || []).map((r) => [r.id, r.name])),
+    [tournament?.rings],
+  )
   const { matchNumByEvent, focusMatchByEvent } = useMemo(
     () => coordinatorEventLookups(coordinationBoard),
     [coordinationBoard],
@@ -160,8 +166,8 @@ export default function ScheduleDashboard({
           </p>
         </div>
         <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-3 xl:min-w-[720px] xl:grid-cols-6">
-          <SummaryTile label="Current minute" value={formatTournamentMinute(currentMinute)} detail={formatMinuteAsClock(currentMinute)} tone="blue" />
-          <SummaryTile label="Completion time" value={formatMinuteAsClock(afterMakespan)} detail={formatDuration(0, afterMakespan)} />
+          <SummaryTile label="Current minute" value={formatTournamentMinute(currentMinute)} detail={formatMinuteAsClock(currentMinute, tournamentStartTime)} tone="blue" />
+          <SummaryTile label="Completion time" value={formatMinuteAsClock(afterMakespan, tournamentStartTime)} detail={formatDuration(0, afterMakespan)} />
           <SummaryTile label="Active rings" value={activeRingCount} detail={`${activeEvents.length} events`} tone="emerald" />
           <SummaryTile
             label="Delayed/paused"
@@ -312,6 +318,8 @@ export default function ScheduleDashboard({
             matchHintByEventId={matchNumByEvent}
             matchRows={ringMatchRowsByRing[ring.ring_id] || []}
             tournament={tournament}
+            tournamentStartTime={tournamentStartTime}
+            ringNameById={ringNameById}
           />
         ))}
       </div>

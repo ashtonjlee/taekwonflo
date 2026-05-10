@@ -241,6 +241,20 @@ When moving from division-block CP-SAT to **match/flight** scheduling:
 
 ---
 
+## 16. MVP limitation — unknown winners and conservative scheduling
+
+Bracket **feeders must finish** before downstream matches start (§4–§5). Until then, **athletes and coaches for future rounds are unknown**. UI and APIs **must** use **“Winner of Match X”** placeholders—not invented names.
+
+**How this interacts with optimization**
+
+1. **Do not** require perfect foreknowledge of winners for **hard** feasibility. Unknown slots should reserve **time/bracket structure** (and respect **known** athlete/coach non-overlap only for sides that are already decided).
+2. After each result, **live repair** / availability refreshes should treat the advancing athlete (and their coach assignment) as **newly known** hard constraints for future intervals.
+3. Full **conditional** “who might win” optimization is **not** required for the MVP; a conservative model (placeholders + rest between rounds for advancing athletes once known) is acceptable until match-level scheduling matures.
+
+**Demo data only:** Mock kyorugi winners in the API are **deterministic simulation noise** (hash-based) to exercise the bracket UI. They are **not** predictions and are **not** authoritative inputs to production scheduling logic.
+
+---
+
 ## Cross-references
 
 - **`docs/DATA_MODEL.md`** — current `Match`, `ScheduledEvent`, coordinator, and change-audit shapes.  

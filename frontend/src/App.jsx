@@ -184,8 +184,7 @@ function App() {
               emergency_type: 'referee_shortage',
               current_minute: 60,
               delay_minutes: 20,
-              referee_crew_id: 'ref-crew-1',
-              unavailable_duration_minutes: 20,
+              unavailable_duration_minutes: 25,
             }
       const [response, snapshot] = await Promise.all([
         getRescheduleDemo(formValues),
@@ -209,12 +208,13 @@ function App() {
     const validationPassed = response.validation?.valid !== false
 
     if (demoKey === 'medical_pause') {
+      const narrative = (response.demo_scenario_reason || '').trim()
       return {
         title: 'Medical pause demo complete',
         strategyLabel: changedCount > 0 ? 'future-event reschedule' : 'no schedule movement needed',
         validationPassed,
         metrics: buildResponseMetrics(response),
-        whatHappened: `A medical pause was applied to ${formValues.ring_id} at T+${formValues.current_minute}.`,
+        whatHappened: `Medical delay targeting ${formValues.ring_id} from about T+${formValues.current_minute}.${narrative ? ` ${narrative}` : ''}`.trim(),
         whatChanged:
           changedCount > 0
             ? `${changedCount} future event${changedCount === 1 ? '' : 's'} changed, including ${delayedCount} delayed event${delayedCount === 1 ? '' : 's'}.`
@@ -223,16 +223,18 @@ function App() {
           changedCount > 0
             ? 'The existing emergency rescheduler froze completed and active work, then adjusted future events around the pause.'
             : 'The selected pause did not create a future conflict, so the schedule stayed intact.',
-        emptyState: changedCount === 0 ? 'Empty state: no downstream event was affected, so there was nothing to repair.' : null,
+        emptyState: response.no_op_reason || (changedCount === 0 ? 'Empty state: no downstream event was affected, so there was nothing to repair.' : null),
       }
     }
 
+    const crewLabel = formValues.referee_crew_id || 'an auto-selected crew'
+    const shortageNarrative = (response.demo_scenario_reason || '').trim()
     return {
       title: 'Referee shortage demo complete',
       strategyLabel: changedCount > 0 ? 'future-event reschedule' : 'no schedule movement needed',
       validationPassed,
       metrics: buildResponseMetrics(response),
-      whatHappened: `${formValues.referee_crew_id} was marked short during the demo window.`,
+      whatHappened: `Referee shortage applied to ${crewLabel}.${shortageNarrative ? ` ${shortageNarrative}` : ''}`.trim(),
       whatChanged:
         changedCount > 0
           ? `${changedCount} future event${changedCount === 1 ? '' : 's'} changed so the unavailable crew is not double-booked.`
@@ -241,7 +243,10 @@ function App() {
         changedCount > 0
           ? 'The existing rescheduler preferred valid future assignments while preserving completed and active events.'
           : 'No match swap or event move was necessary because the shortage did not block a future assignment in this window.',
-      emptyState: changedCount === 0 ? 'Empty state: the shortage window did not force a visible schedule change.' : null,
+      emptyState:
+        response.no_op_reason ||
+        (!response.demo_was_impactful ? 'Demo note: try reloading the snapshot or widening the unavailable window if you need a visible delta.' : null) ||
+        (changedCount === 0 ? 'Empty state: the shortage window did not force a visible schedule change.' : null),
     }
   }
 
@@ -406,6 +411,7 @@ function App() {
               originalSchedule={originalSchedule}
               currentSchedule={currentSchedule}
               changedEvents={changedEvents}
+              scheduleChanges={scheduleChangeDetails}
               validation={validation}
               emergencySummary={emergencySummary}
               onSelectDivision={handleSelectDivision}
@@ -432,6 +438,7 @@ function App() {
             coordinationBoard={coordinationBoard}
             repairMetrics={repairMetrics}
             onSelectDivision={handleSelectDivision}
+            tournamentStartTime={tournament?.tournament_day_start_time || '09:00'}
           />
         )}
         <EmergencyControls
