@@ -98,6 +98,12 @@ Frontend ring surfaces consume coordinator match rows as the primary ring timeli
 - expanded cards show next match rows (MVP: next 20) with a scrollable “show all” list for the ring’s remaining day
 - match rows include match number, division, round, athlete/entry display, assigned coaches, estimated start, and status
 
+### Bracket simulation vs scheduling truth (MVP)
+
+Division detail may show **resolved** sides for completed mock matches. **Future** rounds should surface `source_1_label` / `source_2_label` such as **“Winner of Match 12”** until feeders finish. Demo kyorugi winners use a **deterministic hash** of `match_id` and competitor ids so the UI varies outcomes without predicting real results—**do not** feed those mock winners into hard resource optimization. Operational scheduling should treat unknown advancement slots conservatively until winners are known; see `docs/SCHEDULING_CONSTRAINTS.md` §16.
+
+When multiple rings are available, early kyorugi rounds may display **different `ring_id` values** for matches in the same division (parallel quarterfinal waves). Division-level `ScheduledEvent` rows remain the fiscal block for the optimizer; bracket detail can still illustrate **intended** ring spread for coordinator planning.
+
 Greedy referee rostering minimizes borrowing: crews are filled from their home members first and only spill to other qualified referees when shortages remain, which keeps `RefereeAdjustment` deltas small in the steady state.
 
 ## Demo Scores

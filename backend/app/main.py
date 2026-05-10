@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from .brackets import build_division_detail
 from .data_generator import generate_tournament
-from .demo_scenarios import find_impactful_demo_scenario
+from .demo_scenarios import find_impactful_demo_scenario, pick_referee_shortage_demo_params
 from .local_repair import RepairRequest, try_repair_next_match
 from .match_numbers import build_published_match_number_map
 from .models import ChangedEvent, DivisionDetail, RepairDemoResponse, RescheduleDemoResponse, RingSchedule, SnapshotResponse, SnapshotValidationResponse, Tournament
@@ -230,6 +230,7 @@ def _resolve_emergency_defaults(
 
 
 def _is_meaningful_referee_adjustment(move) -> bool:
+    """Hide no-op rows where ring, crew, and time window are unchanged."""
     return not (
         move.from_crew_id == move.to_crew_id
         and move.from_ring_id == move.to_ring_id
@@ -549,6 +550,29 @@ def reschedule_demo(
     except ScheduleError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
+    if tournament.referees:
+        original_schedule = assign_referees_to_schedule(tournament, original_schedule)
+
+    crew_pick_reason = ""
+    if emergency_type == "referee_shortage" and referee_crew_id is None:
+        picked_crew, cur_pick, u_start_pick, u_dur_pick = pick_referee_shortage_demo_params(
+            original_schedule,
+            current_minute=current_minute,
+            delay_minutes=delay_minutes,
+            referee_crew_id=None,
+        )
+        if picked_crew:
+            referee_crew_id = picked_crew
+            current_minute = cur_pick
+            if unavailable_start_minute is None:
+                unavailable_start_minute = u_start_pick
+            if unavailable_duration_minutes is None:
+                unavailable_duration_minutes = u_dur_pick
+            crew_pick_reason = (
+                "Auto-targeted a near-future high-official event for this crew blackout so the reschedule "
+                "produces visible ring/time movement."
+            )
+
     defaults = _resolve_emergency_defaults(
         emergency_type=emergency_type,
         current_minute=current_minute,
@@ -588,19 +612,19 @@ def reschedule_demo(
 
     notifications = build_mock_notifications(rescheduled_schedule)
     validation = validate_snapshot(tournament=tournament, schedule=rescheduled_schedule, demo_mode=True)
-    baseline_schedule = assign_referees_to_schedule(tournament, original_schedule) if tournament.referees else original_schedule
+    baseline_schedule = original_schedule
     hydrated_schedule = (
         assign_referees_to_schedule(tournament, rescheduled_schedule) if tournament.referees else rescheduled_schedule
     )
 
     adjustment_reason = f"Emergency {emergency_type.replace('_', ' ')} reschedule"
     referee_moves = (
-        diff_referee_assignments(
+        [m for m in diff_referee_assignments(
             tournament,
             baseline_schedule,
             hydrated_schedule,
             reason=adjustment_reason,
-        )
+        ) if _is_meaningful_referee_adjustment(m)]
         if tournament.referees
         else []
     )
@@ -623,6 +647,48 @@ def reschedule_demo(
     annotated_schedule = _annotate_schedule_for_gantt(tournament, hydrated_schedule, changed_events, coordination)
     changed_count, average_delay, max_delay = _change_metrics(changed_events)
 
+    demo_narrative_parts: list[str] = []
+    if crew_pick_reason:
+        demo_narrative_parts.append(crew_pick_reason)
+    if emergency_type == "ring_pause" and defaults.get("ring_id"):
+        ps = int(defaults["pause_start_minute"])
+        pd = int(defaults["pause_duration_minutes"])
+        demo_narrative_parts.append(
+            f"Ring {defaults['ring_id']} paused T+{ps}–T+{ps + pd} ({pd} min); overlapping futures slide or swap rings."
+        )
+    elif emergency_type == "medical_delay" and defaults.get("ring_id"):
+        dm = int(defaults["delay_minutes"])
+        rid = defaults["ring_id"]
+        ring_label = next((r.name for r in tournament.rings if r.id == rid), rid)
+        delayed_future = sum(1 for e in changed_events if e.new_start_minute > e.original_start_minute)
+        demo_narrative_parts.append(
+            f"{ring_label} paused for medical care for {dm} minutes (from about T+{config.current_minute}); "
+            f"the active match resumes once the mat is clear."
+        )
+        if changed_events:
+            demo_narrative_parts.append(
+                f"{len(changed_events)} future event(s) updated ({delayed_future} delayed); "
+                f"later ring queues were shifted where they overlapped the pause."
+            )
+        else:
+            demo_narrative_parts.append(
+                "No future matches needed time or ring changes for this window; no ring reassignment was required."
+            )
+    elif emergency_type == "referee_shortage" and defaults.get("referee_crew_id"):
+        us = int(defaults["unavailable_start_minute"])
+        ud = int(defaults["unavailable_duration_minutes"])
+        demo_narrative_parts.append(
+            f"Crew {defaults['referee_crew_id']} unavailable T+{us}–T+{us + ud}; affected events borrow or jump slots."
+        )
+
+    demo_was_impactful = bool(changed_events or referee_moves)
+    demo_scenario_reason = " ".join(demo_narrative_parts).strip()
+    no_op_reason = (
+        None
+        if demo_was_impactful
+        else "No schedule or referee deltas for this disruption window—the published future plan already avoided the conflict."
+    )
+
     return RescheduleDemoResponse(
         original_schedule=annotated_original,
         rescheduled_schedule=annotated_schedule,
@@ -635,4 +701,7 @@ def reschedule_demo(
         changed_match_count=changed_count,
         average_delay_minutes=average_delay,
         max_delay_minutes=max_delay,
+        demo_was_impactful=demo_was_impactful,
+        demo_scenario_reason=demo_scenario_reason,
+        no_op_reason=no_op_reason,
     )

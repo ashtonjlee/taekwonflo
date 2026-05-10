@@ -11,14 +11,53 @@ function isAffectedRing(emergencySummary, ringId, ringName) {
   return affected === ringId || affected === ringName
 }
 
-function MatchRowCard({ row, tournamentStartTime, onSelectDivision }) {
+function MatchRowCard({ row, tournamentStartTime, onSelectDivision, changedEventMap, ringNameById }) {
+  const change = changedEventMap?.[row.event_id]
+  const delayedMin = change
+    ? Math.max(0, change.new_start_minute - change.original_start_minute)
+    : row.delay_minutes || 0
+  const ringMove =
+    change && change.original_ring_id !== change.new_ring_id
+      ? `${ringNameById?.[change.original_ring_id] || change.original_ring_id} → ${ringNameById?.[change.new_ring_id] || change.new_ring_id}`
+      : null
+  const refChanged = Boolean(
+    change &&
+      (change.original_referee_crew_id !== change.new_referee_crew_id ||
+        (change.changes || []).includes('referee_crew_changed')),
+  )
+  const showRescheduled = Boolean(change) && !ringMove && delayedMin === 0 && !refChanged
+
   return (
     <button
       type="button"
       onClick={onSelectDivision}
-      className="w-full rounded-md border border-slate-200 bg-slate-50 p-3 text-left text-xs hover:border-blue-300 hover:bg-blue-50"
+      className={`w-full rounded-md border p-3 text-left text-xs transition-colors ${
+        change ? 'border-amber-400 bg-amber-50/90 ring-1 ring-amber-200' : 'border-slate-200 bg-slate-50'
+      } hover:border-blue-300 hover:bg-blue-50`}
     >
-      <div className="font-semibold text-slate-900">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {delayedMin > 0 ? (
+          <span className="rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-rose-900">
+            Delayed +{delayedMin} min
+          </span>
+        ) : null}
+        {ringMove ? (
+          <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-900">
+            Moved ring: {ringMove}
+          </span>
+        ) : null}
+        {refChanged ? (
+          <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-violet-900">
+            Referee changed
+          </span>
+        ) : null}
+        {showRescheduled ? (
+          <span className="rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-950">
+            Rescheduled
+          </span>
+        ) : null}
+      </div>
+      <div className="mt-1 font-semibold text-slate-900">
         Match {row.match_number} · {row.division_name}
       </div>
       <div className="mt-0.5 text-slate-700">{row.round_name}</div>
@@ -31,7 +70,7 @@ function MatchRowCard({ row, tournamentStartTime, onSelectDivision }) {
   )
 }
 
-function MatchRowsModal({ ringName, rows, tournamentStartTime, onClose, onSelectDivision }) {
+function MatchRowsModal({ ringName, rows, tournamentStartTime, onClose, onSelectDivision, changedEventMap, ringNameById }) {
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4">
       <div className="max-h-[85vh] w-full max-w-3xl overflow-hidden rounded-xl bg-white shadow-2xl">
@@ -51,6 +90,8 @@ function MatchRowsModal({ ringName, rows, tournamentStartTime, onClose, onSelect
               key={row.match_id}
               row={row}
               tournamentStartTime={tournamentStartTime}
+              changedEventMap={changedEventMap}
+              ringNameById={ringNameById}
               onSelectDivision={() =>
                 onSelectDivision?.({
                   division_id: row.division_id,
@@ -84,6 +125,7 @@ export default function RingColumn({
   matchHintByEventId = {},
   matchRows = [],
   tournament = null,
+  ringNameById = {},
 }) {
   const [showAllMatches, setShowAllMatches] = useState(false)
   const m = Number(currentMinute ?? 0)
@@ -279,6 +321,8 @@ export default function RingColumn({
                       key={row.match_id}
                       row={row}
                       tournamentStartTime={tournamentStartTime}
+                      changedEventMap={changedEventMap}
+                      ringNameById={ringNameById}
                       onSelectDivision={() =>
                         onSelectDivision?.({
                           division_id: row.division_id,
@@ -325,6 +369,8 @@ export default function RingColumn({
           ringName={ringName}
           rows={remainingMatchRows}
           tournamentStartTime={tournamentStartTime}
+          changedEventMap={changedEventMap}
+          ringNameById={ringNameById}
           onClose={() => setShowAllMatches(false)}
           onSelectDivision={onSelectDivision}
         />
