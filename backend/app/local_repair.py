@@ -5,6 +5,7 @@ from typing import Literal
 
 from .availability import AvailabilityIndex, build_availability_index, coach_ids_for_match, resource_requirements_for_match
 from .brackets import athlete_ids_involved, build_division_detail
+from .match_numbers import build_published_match_number_map
 from .models import (
     ChangedEvent,
     ChangedMatch,
@@ -25,7 +26,7 @@ from .schedule_ops import (
     diff_referee_assignments,
     enrich_schedule_changes,
 )
-from .validation import validate_snapshot
+from .validation import sort_schedule, validate_schedule_hard_constraints, validate_snapshot
 
 RepairEmergencyType = Literal["medical_delay", "ring_pause", "referee_shortage", "coach_conflict", "athlete_conflict"]
 
@@ -48,9 +49,18 @@ def try_repair_next_match(
     request: RepairRequest,
 ) -> RepairDemoResponse:
     availability = build_availability_index(tournament, original_schedule, request.current_minute)
+    # Stable match number map from the published schedule. Carried into every detail
+    # rebuild so repair output never re-numbers the day's matches.
+    published_match_numbers = build_published_match_number_map(tournament, original_schedule)
     affected_event = _find_affected_event(tournament, original_schedule, request)
     affected_detail = (
-        build_division_detail(tournament, original_schedule, affected_event.division_id, request.current_minute)
+        build_division_detail(
+            tournament,
+            original_schedule,
+            affected_event.division_id,
+            request.current_minute,
+            match_number_by_match_id=published_match_numbers,
+        )
         if affected_event
         else None
     )
@@ -149,6 +159,7 @@ def try_repair_next_match(
                 affected_event.division_id,
                 request.current_minute,
                 focus_match_id=affected_match.match_id,
+                match_number_by_match_id=published_match_numbers,
             )
             return _response(
                 tournament=tournament,
@@ -208,6 +219,7 @@ def try_repair_next_match(
                     affected_event.division_id,
                     request.current_minute,
                     focus_match_id=affected_match.match_id,
+                    match_number_by_match_id=published_match_numbers,
                 ),
                 operational_minute=request.current_minute,
                 summary_reason=_reason_for_request(request),
@@ -381,12 +393,59 @@ def try_repair_next_match(
                     affected_event.division_id,
                     request.current_minute,
                     focus_match_id=affected_match.match_id,
+                    match_number_by_match_id=published_match_numbers,
                 ),
                 operational_minute=request.current_minute,
                 summary_reason=_reason_for_request(request),
                 explanation=(
                     f"Coach delayed {request.delay_minutes} minutes. "
                     f"Match {affected_match.match_number} waited locally; no global reschedule needed."
+                ),
+            )
+
+    # Strategy 6: local ring shift for coach/athlete delays before any global cascade.
+    if affected_event and is_coach_or_athlete and request.delay_minutes > 0:
+        repaired_schedule, changed_events = _shift_ring_locally(
+            original_schedule,
+            ring_id=affected_event.ring_id,
+            current_minute=request.current_minute,
+            delay_minutes=request.delay_minutes,
+        )
+        if changed_events:
+            return _response(
+                tournament=tournament,
+                original_schedule=original_schedule,
+                repaired_schedule=repaired_schedule,
+                strategy="local_shift",
+                affected_match=affected_match,
+                replacement_match=None,
+                changed_events=changed_events,
+                changed_matches=[],
+                resource_locations=_resource_locations(availability, request),
+                notifications=[
+                    NotificationMessage(
+                        id="repair-local-shift-coach-athlete",
+                        channel="ops",
+                        text=(
+                            f"Local ring shift on {affected_event.ring_name}; "
+                            f"future queue moved by {request.delay_minutes} minutes."
+                        ),
+                    )
+                ],
+                validation=validate_snapshot(tournament=tournament, schedule=repaired_schedule, demo_mode=True),
+                division_detail=build_division_detail(
+                    tournament,
+                    repaired_schedule,
+                    affected_event.division_id,
+                    request.current_minute,
+                    focus_match_id=(affected_match.match_id if affected_match else None),
+                    match_number_by_match_id=published_match_numbers,
+                ),
+                operational_minute=request.current_minute,
+                summary_reason=_reason_for_request(request),
+                explanation=(
+                    f"Applied local ring shift on {affected_event.ring_name} before global repair "
+                    f"for a {request.delay_minutes}-minute delay."
                 ),
             )
 
@@ -900,7 +959,7 @@ def _find_affected_event(
         key=lambda event: (0 if event.start_minute <= request.current_minute < event.end_minute else 1, event.start_minute),
     )
     for event in events:
-        payload = event_by_id[event.event_id]
+        payload = event_by_id[event.source_event_id or event.event_id]
         if request.ring_id and event.ring_id != request.ring_id:
             continue
         if request.referee_crew_id and event.referee_crew_id != request.referee_crew_id:
@@ -980,7 +1039,7 @@ def _find_same_ring_replacement(
         if event.start_minute - affected_event.start_minute > max(60, request.delay_minutes * 3):
             break
         detail = build_division_detail(tournament, schedule, event.division_id, request.current_minute)
-        payload = event_by_id[event.event_id]
+        payload = event_by_id[event.source_event_id or event.event_id]
         for match in detail.bracket.matches:
             if match.status not in {"waiting", "staging"}:
                 continue
@@ -1037,16 +1096,42 @@ def _available_for_current_slot(
 
 
 def _bracket_dependencies_ready(detail: DivisionDetail, match: Match) -> bool:
+    """Is this match safe to schedule now?
+
+    For kyorugi we only require its **direct feeder matches** to be done — not every
+    prior round in the division. That's the actual rule (a quarterfinal can run while
+    other quarterfinals are still going). Falling back to "all prior rounds completed"
+    is far too strict and was the main reason same-division swaps almost never fired.
+
+    For poomsae round-blocks we require that the prior round's window has ended (the
+    block is contiguous in time, but a swap candidate inside the same round is fine).
+    """
     round_names = detail.bracket.rounds
+    if not round_names:
+        return True
     current_round_index = round_names.index(match.round_name) if match.round_name in round_names else 0
     if current_round_index == 0:
         return True
-    prior_rounds = set(round_names[:current_round_index])
-    return all(
-        prior_match.status == "completed"
-        for prior_match in detail.bracket.matches
-        if prior_match.round_name in prior_rounds
-    )
+
+    # Direct-feeder gate (kyorugi).
+    feeder_numbers = [match.feeder_1_match_number, match.feeder_2_match_number]
+    if any(num is not None for num in feeder_numbers):
+        by_number = {duel.match_number: duel for duel in detail.bracket.matches}
+        for num in feeder_numbers:
+            if num is None:
+                continue
+            feeder = by_number.get(num)
+            if feeder and feeder.status != "completed":
+                return False
+        return True
+
+    # Round-block gate (poomsae / pair / team poomsae).
+    prior_round = round_names[current_round_index - 1]
+    prior_matches = [m for m in detail.bracket.matches if m.round_name == prior_round]
+    if not prior_matches:
+        return True
+    prior_round_end = max(m.end_minute for m in prior_matches)
+    return match.start_minute >= prior_round_end
 
 
 def _match_uses_blocked_resource(
@@ -1126,32 +1211,57 @@ def _swap_events_in_same_ring(
 ) -> tuple[list[RingSchedule], list[ChangedEvent]]:
     repaired: list[RingSchedule] = []
     changed: list[ChangedEvent] = []
+    compact_from = min(affected_event.start_minute, replacement_event.start_minute)
     for ring in schedule:
-        updated_events: list[ScheduledEvent] = []
+        updated_events: list[ScheduledEvent] = [ScheduledEvent(**event.model_dump()) for event in ring.events]
         for event in ring.events:
-            updated = ScheduledEvent(**event.model_dump())
-            if event.event_id == affected_event.event_id:
-                duration = updated.end_minute - updated.start_minute
-                updated.start_minute = replacement_event.start_minute
-                updated.end_minute = updated.start_minute + duration
-            elif event.event_id == replacement_event.event_id:
-                duration = updated.end_minute - updated.start_minute
-                updated.start_minute = affected_event.start_minute
-                updated.end_minute = updated.start_minute + duration
-            if updated.start_minute != event.start_minute:
-                changed.append(
-                    ChangedEvent(
-                        event_id=updated.event_id,
-                        changes=["start_time_changed"],
-                        original_ring_id=event.ring_id,
-                        new_ring_id=updated.ring_id,
-                        original_referee_crew_id=event.referee_crew_id,
-                        new_referee_crew_id=updated.referee_crew_id,
-                        original_start_minute=event.start_minute,
-                        new_start_minute=updated.start_minute,
-                    )
+            for updated in updated_events:
+                if updated.event_id != event.event_id:
+                    continue
+                if event.event_id == affected_event.event_id:
+                    duration = updated.end_minute - updated.start_minute
+                    updated.start_minute = replacement_event.start_minute
+                    updated.end_minute = updated.start_minute + duration
+                elif event.event_id == replacement_event.event_id:
+                    duration = updated.end_minute - updated.start_minute
+                    updated.start_minute = affected_event.start_minute
+                    updated.end_minute = updated.start_minute + duration
+                break
+
+        if ring.ring_id == affected_event.ring_id:
+            untouched = [event for event in updated_events if event.start_minute < compact_from]
+            compactable = sorted(
+                [event for event in updated_events if event.start_minute >= compact_from],
+                key=lambda item: (item.start_minute, item.event_id),
+            )
+            cursor = max([event.end_minute for event in untouched], default=compact_from)
+            rebuilt = untouched
+            for event in compactable:
+                duration = event.end_minute - event.start_minute
+                start = max(event.start_minute, cursor)
+                event.start_minute = start
+                event.end_minute = start + duration
+                cursor = event.end_minute
+                rebuilt.append(event)
+            updated_events = rebuilt
+
+        original_by_id = {event.event_id: event for event in ring.events}
+        for updated in updated_events:
+            original = original_by_id[updated.event_id]
+            if updated.start_minute == original.start_minute:
+                continue
+            changed.append(
+                ChangedEvent(
+                    event_id=updated.event_id,
+                    changes=["start_time_changed"],
+                    original_ring_id=original.ring_id,
+                    new_ring_id=updated.ring_id,
+                    original_referee_crew_id=original.referee_crew_id,
+                    new_referee_crew_id=updated.referee_crew_id,
+                    original_start_minute=original.start_minute,
+                    new_start_minute=updated.start_minute,
                 )
-            updated_events.append(updated)
+            )
         repaired.append(RingSchedule(ring_id=ring.ring_id, ring_name=ring.ring_name, events=sorted(updated_events, key=lambda item: item.start_minute)))
     return repaired, changed
 
@@ -1266,6 +1376,15 @@ def _response(
 ) -> RepairDemoResponse:
     baseline_schedule = assign_referees_to_schedule(tournament, original_schedule) if tournament.referees else original_schedule
     hydrated_repair = assign_referees_to_schedule(tournament, repaired_schedule) if tournament.referees else repaired_schedule
+    hydrated_repair = sort_schedule(hydrated_repair)
+    hard_validation = validate_schedule_hard_constraints(tournament, hydrated_repair)
+    if not hard_validation.valid:
+        hydrated_repair = baseline_schedule
+        changed_events = []
+        changed_matches = []
+        strategy = "infeasible"
+        explanation = "No local repair was returned because the candidate violated hard schedule constraints."
+        hard_validation = validate_schedule_hard_constraints(tournament, hydrated_repair)
     hydrated_repair = _annotate_schedule_changes(hydrated_repair, changed_events)
     referee_moves = (
         diff_referee_assignments(
@@ -1301,6 +1420,7 @@ def _response(
         "small_local_wait",
         "local_shift",
     }
+    response_validation = hard_validation if strategy in {"no_valid_local_repair", "infeasible"} else validation
     return RepairDemoResponse(
         original_schedule=baseline_schedule,
         repaired_schedule=hydrated_repair,
@@ -1311,7 +1431,7 @@ def _response(
         changed_matches=changed_matches,
         resource_locations=resource_locations,
         notifications=notifications,
-        validation=validation,
+        validation=response_validation,
         division_detail=division_detail,
         schedule_changes=enriched,
         referee_adjustments=referee_moves,

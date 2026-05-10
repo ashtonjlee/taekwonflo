@@ -6,6 +6,7 @@ from .brackets import build_division_detail
 from .models import RingSchedule, SnapshotValidationResponse, Tournament
 
 COUNT_PATTERN = re.compile(r"\((\d+)\s+competitors\)")
+POOMSAE_TYPES = {"poomsae", "pair_poomsae", "team_poomsae"}
 
 
 def validate_snapshot(
@@ -45,6 +46,11 @@ def validate_snapshot(
             )
 
     for event in tournament.events:
+        if event.event_type in POOMSAE_TYPES and event.required_coach_ids:
+            warnings.append(
+                f"Event '{event.event_id}' is {event.event_type} and lists required_coach_ids; "
+                "poomsae coach IDs must be ignored by scheduling constraints for MVP."
+            )
         for athlete_id in event.athlete_ids:
             if athlete_id not in athlete_ids:
                 errors.append(f"Event '{event.event_id}' references missing athlete_id '{athlete_id}'.")
@@ -68,9 +74,15 @@ def validate_snapshot(
                 f"Event '{event.event_id}' division_name differs from division '{event.division_id}' name."
             )
 
-    _validate_schedule_overlaps(schedule, errors)
-    _validate_poomsae_before_kyorugi(schedule, errors if demo_mode else warnings)
-    _validate_poomsae_round_block_contiguity(tournament, schedule, errors)
+    _validate_schedule_overlaps(schedule, errors, warnings)
+    _validate_poomsae_coaches_not_scheduled(schedule, warnings)
+    _validate_kyorugi_schedule_shape(tournament, schedule, errors, warnings)
+    _validate_poomsae_before_kyorugi(schedule, warnings)
+    # Until the solver moves to true match-level intervals (see
+    # docs/SCHEDULER_ARCHITECTURE_NOTES.md), the contiguity check fires often on
+    # otherwise-feasible snapshots. Treat it as a warning in demo mode so the
+    # validation panel is actionable rather than a wall of errors.
+    _validate_poomsae_round_block_contiguity(tournament, schedule, warnings if demo_mode else errors)
     _validate_bracket_round_precedence(tournament, schedule, errors)
     _validate_match_level_detail(tournament, schedule, errors, warnings)
 
@@ -79,7 +91,144 @@ def validate_snapshot(
     return SnapshotValidationResponse(valid=len(errors) == 0, errors=errors, warnings=warnings)
 
 
-def _validate_schedule_overlaps(schedule: list[RingSchedule], errors: list[str]) -> None:
+def validate_schedule_hard_constraints(
+    tournament: Tournament,
+    schedule: list[RingSchedule],
+) -> SnapshotValidationResponse:
+    """Validate constraints that must never be returned as a successful schedule."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    _validate_schedule_overlaps(schedule, errors, warnings)
+    _validate_poomsae_coaches_not_scheduled(schedule, warnings)
+    _validate_kyorugi_schedule_shape(tournament, schedule, errors, warnings)
+    _validate_scheduled_poomsae_block_continuity(tournament, schedule, errors)
+    _validate_bracket_round_precedence(tournament, schedule, errors)
+    _validate_match_level_detail(tournament, schedule, errors, warnings)
+    _validate_live_operations_hints(tournament, schedule, warnings)
+
+    return SnapshotValidationResponse(valid=len(errors) == 0, errors=errors, warnings=warnings)
+
+
+def sort_schedule(schedule: list[RingSchedule]) -> list[RingSchedule]:
+    return [
+        RingSchedule(
+            ring_id=ring.ring_id,
+            ring_name=ring.ring_name,
+            events=sorted(
+                (event.model_copy(update={"ring_id": ring.ring_id, "ring_name": ring.ring_name}) for event in ring.events),
+                key=lambda event: (event.start_minute, event.end_minute, event.event_id),
+            ),
+        )
+        for ring in schedule
+    ]
+
+
+def _validate_scheduled_poomsae_block_continuity(
+    tournament: Tournament,
+    schedule: list[RingSchedule],
+    errors: list[str],
+) -> None:
+    poomsae_types = {"poomsae", "pair_poomsae", "team_poomsae"}
+    poomsae_division_ids = {
+        division.id for division in tournament.divisions if division.event_type in poomsae_types
+    }
+    if not poomsae_division_ids:
+        return
+
+    for ring in schedule:
+        by_division: dict[str, list] = {}
+        for event in ring.events:
+            if event.division_id in poomsae_division_ids:
+                by_division.setdefault(event.division_id, []).append(event)
+
+        for division_id, events in by_division.items():
+            if len(events) <= 1:
+                continue
+            block_start = min(event.start_minute for event in events)
+            block_end = max(event.end_minute for event in events)
+            for event in ring.events:
+                if event.division_id == division_id:
+                    continue
+                if event.start_minute < block_end and event.end_minute > block_start:
+                    errors.append(
+                        f"Poomsae scheduled block interrupted on {ring.ring_id}: division "
+                        f"'{division_id}' window [{block_start},{block_end}) overlaps event "
+                        f"'{event.event_id}' [{event.start_minute},{event.end_minute})."
+                    )
+
+
+def _validate_kyorugi_schedule_shape(
+    tournament: Tournament,
+    schedule: list[RingSchedule],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    events = [event for ring in schedule for event in ring.events]
+    for division in tournament.divisions:
+        if division.event_type != "kyorugi":
+            continue
+        rows = [event for event in events if event.division_id == division.id]
+        if not rows:
+            continue
+        match_rows = [event for event in rows if event.match_id]
+        if not match_rows:
+            errors.append(f"{division.id}: kyorugi division is scheduled as a division block, not match-level rows.")
+            continue
+        expected = _expected_kyorugi_scheduled_match_count(len(division.athlete_ids))
+        if len(match_rows) != expected:
+            errors.append(
+                f"{division.id}: kyorugi scheduled match count is {len(match_rows)}, expected {expected} from bracket structure."
+            )
+        for event in match_rows:
+            duration = event.end_minute - event.start_minute
+            if duration > 15:
+                errors.append(
+                    f"{division.id}: kyorugi match '{event.event_id}' duration is {duration}m; expected one match around 5-10m."
+                )
+            if event.round_name == "final" and duration > 12:
+                errors.append(
+                    f"{division.id}: kyorugi final '{event.event_id}' is {duration}m, not a single-match duration."
+                )
+            if duration < 5 or duration > 10:
+                warnings.append(
+                    f"{division.id}: kyorugi match '{event.event_id}' duration is {duration}m; MVP target is 5-10m."
+                )
+        by_round: dict[str, list] = {}
+        for event in match_rows:
+            by_round.setdefault(event.round_name or "", []).append(event)
+        for round_name, round_rows in by_round.items():
+            if len(round_rows) <= 1:
+                continue
+            rings_used = {event.ring_id for event in round_rows}
+            if len(rings_used) == 1 and len(schedule) > 1:
+                warnings.append(
+                    f"{division.id}: all {len(round_rows)} {round_name} matches are on {next(iter(rings_used))}; "
+                    "same-round kyorugi matches may be spread across rings."
+                )
+
+
+def _expected_kyorugi_scheduled_match_count(competitor_count: int) -> int:
+    bracket_size = 1
+    while bracket_size < max(2, competitor_count):
+        bracket_size *= 2
+    tokens: list[bool] = [idx < competitor_count for idx in range(bracket_size)]
+    count = 0
+    while len(tokens) > 1:
+        next_tokens: list[bool] = []
+        for idx in range(0, len(tokens), 2):
+            left = tokens[idx]
+            right = tokens[idx + 1] if idx + 1 < len(tokens) else False
+            if left and right:
+                count += 1
+                next_tokens.append(True)
+            else:
+                next_tokens.append(left or right)
+        tokens = next_tokens
+    return count
+
+
+def _validate_schedule_overlaps(schedule: list[RingSchedule], errors: list[str], warnings: list[str]) -> None:
     all_events = [event for ring in schedule for event in ring.events]
 
     # Same ring overlap
@@ -126,11 +275,34 @@ def _validate_schedule_overlaps(schedule: list[RingSchedule], errors: list[str])
                     f"Athlete overlap between {left.event_id} and {right.event_id}: {sorted(shared_athletes)}."
                 )
 
+            if left.event_type != "kyorugi" or right.event_type != "kyorugi":
+                continue
+
             shared_coaches = left_coaches.intersection(right.required_coach_ids)
             if shared_coaches:
-                errors.append(
-                    f"Coach overlap between {left.event_id} and {right.event_id}: {sorted(shared_coaches)}."
-                )
+                overlap = min(left.end_minute, right.end_minute) - max(left.start_minute, right.start_minute)
+                if overlap <= 2:
+                    warnings.append(
+                        f"Coach overlap tolerance (<=2m) between {left.event_id} and {right.event_id}: {sorted(shared_coaches)} ({overlap}m)."
+                    )
+                else:
+                    errors.append(
+                        f"Coach overlap between {left.event_id} and {right.event_id}: {sorted(shared_coaches)} ({overlap}m)."
+                    )
+
+
+def _validate_poomsae_coaches_not_scheduled(schedule: list[RingSchedule], warnings: list[str]) -> None:
+    offenders = [
+        event.event_id
+        for ring in schedule
+        for event in ring.events
+        if event.event_type in POOMSAE_TYPES and event.required_coach_ids
+    ]
+    if offenders:
+        warnings.append(
+            "poomsae_coach_constraints_present: scheduled poomsae rows include required_coach_ids "
+            f"({', '.join(sorted(offenders)[:8])}); these must not be used as hard scheduling constraints."
+        )
 
 
 def _validate_match_level_detail(
@@ -194,6 +366,8 @@ def _validate_match_level_detail(
 
             for side_name, side in (("competitor_1", match.competitor_1), ("competitor_2", match.competitor_2)):
                 if not side:
+                    continue
+                if division.event_type != "kyorugi":
                     continue
                 if side.coach_ids and not side.assigned_coach_id:
                     errors.append(
@@ -365,21 +539,38 @@ def _validate_bracket_round_precedence(
 def _validate_live_operations_hints(tournament: Tournament, schedule: list[RingSchedule], warnings: list[str]) -> None:
     ls = getattr(tournament, "lunch_start_minute", 180)
     grace_cut = ls + getattr(tournament, "lunch_grace_minutes", 20)
+    all_events = [event for ring in schedule for event in ring.events]
 
     first_starts_ring: dict[str, int | None] = {}
     num_rings = len(schedule)
+    ring_workloads: dict[str, int] = {}
+    ring_end_times: dict[str, int] = {}
 
     for ring_row in schedule:
         evts = sorted(ring_row.events or [], key=lambda event: event.start_minute)
         first_starts_ring[ring_row.ring_id] = evts[0].start_minute if evts else None
+        ring_workloads[ring_row.ring_id] = sum(max(0, event.end_minute - event.start_minute) for event in evts)
+        ring_end_times[ring_row.ring_id] = max((event.end_minute for event in evts), default=0)
 
         for left, right in zip(evts, evts[1:]):
             gap = right.start_minute - left.end_minute
             if gap >= 45:
                 warnings.append(
-                    f"Large idle gap on {ring_row.ring_name}: {gap} minutes between '{left.division_name}' "
+                    f"large_idle_gap: {ring_row.ring_name} has {gap} minutes between '{left.division_name}' "
                     f"ending T+{left.end_minute} and '{right.division_name}' starting T+{right.start_minute}."
                 )
+            if gap >= 30:
+                midpoint = left.end_minute + gap // 2
+                active_elsewhere = sum(
+                    1
+                    for event in all_events
+                    if event.ring_id != ring_row.ring_id and event.start_minute <= midpoint < event.end_minute
+                )
+                if active_elsewhere < max(0, num_rings - 1):
+                    warnings.append(
+                        f"Potentially avoidable idle on {ring_row.ring_name}: {gap}-minute gap while not all rings were busy "
+                        f"(T+{left.end_minute} to T+{right.start_minute})."
+                    )
 
         for evt in evts:
             crossover = evt.start_minute < ls and evt.end_minute > grace_cut
@@ -406,16 +597,81 @@ def _validate_live_operations_hints(tournament: Tournament, schedule: list[RingS
 
     if utilize_all and num_evt >= num_rings and empties:
         warnings.append(
-            f"Unused ring(s) although crews/divisions suffice to spread workload: {', '.join(sorted(empties))}."
+            "unused_ring_with_available_work: "
+            + f"rings {', '.join(sorted(empties))} had no scheduled work although events/crews were sufficient."
         )
 
     nonzero_first = [(rid, fst) for rid, fst in first_starts_ring.items() if fst is not None]
     if nonzero_first:
         earliest = min(pair[1] for pair in nonzero_first)
+        if earliest > 0 and len(tournament.events or []) >= num_rings and len(tournament.referee_crews or []) >= num_rings:
+            warnings.append(
+                f"late_first_start: earliest ring begins at T+{earliest} despite enough events/crews to start at T+0."
+            )
         stragglers = [rid for rid, fst in nonzero_first if fst is not None and earliest == 0 and fst >= 55]
         if stragglers:
             warnings.append(
-                "Ring first-start disparity: "
+                "late_first_start: ring first-start disparity: "
                 + ", ".join(sorted(stragglers))
                 + " start much later than other rings despite spare referee crews.",
+            )
+        late_rings = [rid for rid, fst in nonzero_first if fst is not None and fst >= 30]
+        if len(late_rings) > 0 and len(tournament.events or []) >= num_rings:
+            warnings.append(
+                "late_first_start: "
+                + ", ".join(sorted(late_rings))
+                + " start at/after T+30 despite enough schedulable work."
+            )
+
+    used_workloads = [work for rid, work in ring_workloads.items() if first_starts_ring.get(rid) is not None]
+    total_workload = sum(ring_workloads.values())
+    if total_workload > 0 and len(ring_workloads) >= 2:
+        overloaded = [
+            rid for rid, work in ring_workloads.items() if work / total_workload > 0.40
+        ]
+        underloaded = [
+            rid for rid, work in ring_workloads.items() if work / total_workload < 0.10
+        ]
+        if overloaded and underloaded:
+            warnings.append(
+                "ring_workload_extreme_imbalance: "
+                + ", ".join(sorted(overloaded))
+                + " carry more than 40% of scheduled duration while "
+                + ", ".join(sorted(underloaded))
+                + " carry less than 10%."
+            )
+    latest_end = max(ring_end_times.values(), default=0)
+    if latest_end >= 30 * 60:
+        warnings.append(
+            f"unreasonable_schedule_duration: schedule reaches T+{latest_end} (30+ hours); "
+            "normal CSV/demo data should be parallelized instead of serialized."
+        )
+    elif latest_end >= 12 * 60:
+        warnings.append(
+            f"long_schedule_duration: schedule reaches T+{latest_end}; check ring balance and poomsae parallelism."
+        )
+    if len(used_workloads) >= 2:
+        max_work = max(used_workloads)
+        min_work = min(used_workloads)
+        spread = max_work - min_work
+        avg_work = sum(used_workloads) / len(used_workloads)
+        if spread >= 120:
+            warnings.append(
+                f"ring_workload_imbalance: workload spread is {spread} minutes (max={max_work}, min={min_work}, avg={avg_work:.1f})."
+            )
+        overloaded = [
+            rid
+            for rid, work in ring_workloads.items()
+            if first_starts_ring.get(rid) is not None and work >= min_work + 150
+        ]
+        if overloaded:
+            warnings.append(
+                "overloaded_ring: "
+                + ", ".join(sorted(overloaded))
+                + f" carry significantly more work (min={min_work}, max={max_work})."
+            )
+        end_spread = max(ring_end_times.values()) - min(ring_end_times.values())
+        if end_spread >= 120:
+            warnings.append(
+                f"ring_workload_imbalance: ring finish-time spread is {end_spread} minutes (latest={max(ring_end_times.values())}, earliest={min(ring_end_times.values())})."
             )

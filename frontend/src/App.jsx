@@ -1,14 +1,13 @@
 import { useEffect, useState } from 'react'
 import {
+  generateDemoTournament,
   getDivisionDetail,
   getHealth,
-  getMockTournamentSnapshot,
   importCsvTournament,
-  getRepairDemo,
-  getRescheduleDemo,
-  getValidationSnapshot,
   postDivisionDetail,
   postLiveOperations,
+  postRepairDemo,
+  postRescheduleDemo,
 } from './api'
 import TournamentSetup from './components/TournamentSetup'
 import DemoModePanel from './components/DemoModePanel'
@@ -83,7 +82,10 @@ function App() {
   }
 
   function applyRescheduleResponse(response, formValues) {
-    setOriginalSchedule(response.original_schedule)
+    // Original schedule is the published baseline. Once we have one, keep it; do not
+    // overwrite it on every demo run so the UI can always diff against the same
+    // baseline. (See docs/SCHEDULER_ARCHITECTURE_NOTES.md §9.)
+    setOriginalSchedule((prev) => (prev && prev.length ? prev : response.original_schedule))
     setCurrentSchedule(response.rescheduled_schedule)
     setChangedEvents(response.changed_events)
     setNotifications(response.notifications)
@@ -118,12 +120,27 @@ function App() {
     try {
       setLoadingEmergency(true)
       setError(null)
-      const [response, snapshot] = await Promise.all([
-        getRescheduleDemo(formValues),
-        getMockTournamentSnapshot(),
-      ])
-      setTournament(snapshot.tournament)
-      applyRescheduleResponse(response, formValues)
+      if (!tournament || !originalSchedule.length) {
+        setError('Generate or upload a tournament first.')
+        return
+      }
+      const response =
+        formValues.emergency_type === 'coach_conflict'
+          ? await postRepairDemo({
+              tournament,
+              original_schedule: originalSchedule,
+              ...formValues,
+            })
+          : await postRescheduleDemo({
+              tournament,
+              original_schedule: originalSchedule,
+              ...formValues,
+            })
+      if (formValues.emergency_type === 'coach_conflict') {
+        applyRepairResponse(response, formValues)
+      } else {
+        applyRescheduleResponse(response, formValues)
+      }
       setDemoResult(null)
       setDemoError(null)
     } catch (simulationError) {
@@ -147,7 +164,77 @@ function App() {
     return response
   }
 
+  async function handleGenerateDemoTournament() {
+    try {
+      setLoadingDemo('generate_tournament')
+      setDemoError(null)
+      setError(null)
+      setDemoResult(null)
+      const response = await generateDemoTournament()
+      setTournament(response.tournament)
+      setOriginalSchedule(response.schedule)
+      setCurrentSchedule(response.schedule)
+      setChangedEvents([])
+      setNotifications(response.notifications || [])
+      setValidation(null)
+      setEmergencySummary(null)
+      setLiveMinute(0)
+      setScheduleChangeDetails([])
+      setRefereeAdjustments([])
+      setCoordinationBoard(null)
+      setRingOperationalHints({})
+      setRepairMetrics(null)
+      setDivisionDetail(null)
+      setDivisionDetailError(null)
+      setDivisionResourceLocations([])
+      setEventLog([
+        {
+          id: `demo-${Date.now()}`,
+          text: `Demo tournament generated: ${response.preview?.athlete_count || 0} athletes, ${response.preview?.division_count || 0} divisions.`,
+        },
+      ])
+    } catch (generateError) {
+      setDemoError(generateError.message)
+    } finally {
+      setLoadingDemo(null)
+    }
+  }
+
+  function applyRepairResponse(response, formValues) {
+    setOriginalSchedule((prev) => (prev && prev.length ? prev : response.original_schedule))
+    setCurrentSchedule(response.repaired_schedule)
+    setChangedEvents(response.changed_events || [])
+    setNotifications(response.notifications || [])
+    setValidation(response.validation)
+    setScheduleChangeDetails(response.schedule_changes || [])
+    setRefereeAdjustments(response.referee_adjustments || [])
+    setCoordinationBoard(response.coordination_board || null)
+    setRepairMetrics({
+      changed_match_count: response.changed_match_count ?? response.changed_events?.length ?? 0,
+      average_delay_minutes: response.average_delay_minutes ?? 0,
+      max_delay_minutes: response.max_delay_minutes ?? 0,
+      repair_strategy_used: response.repair_strategy_used,
+      queue_repair_applied: Boolean(response.queue_repair_applied),
+      local_swap_used: Boolean(response.local_swap_used),
+      global_reschedule_used: Boolean(response.global_reschedule_used),
+      explanation: response.explanation || '',
+    })
+    setDivisionDetail(response.division_detail || null)
+    setDivisionResourceLocations(response.resource_locations || [])
+    setEmergencySummary({
+      emergency_type: formValues.emergency_type || 'coach_conflict',
+      affectedResource: response.resource_locations?.[0]?.resource_id || formValues.coach_id || 'auto-selected coach',
+      current_minute: response.current_minute ?? formValues.current_minute ?? liveMinute,
+      duration_minutes: formValues.delay_minutes,
+    })
+    setLiveMinute(response.current_minute ?? formValues.current_minute ?? liveMinute)
+  }
+
   async function injectLiveDelay(type, minute, random = false) {
+    if (!tournament || !originalSchedule.length) {
+      setDemoError('Generate or upload a tournament first.')
+      return
+    }
     // Random delays must only happen at the current live tick — never inject in the past.
     const safeMinute = Math.max(minute, liveMinute)
     const params = {
@@ -161,31 +248,23 @@ function App() {
     }
     const response =
       type === 'coach_conflict'
-        ? await getRepairDemo({
+        ? await postRepairDemo({
+            tournament,
+            original_schedule: originalSchedule,
             emergency_type: 'coach_conflict',
             current_minute: safeMinute,
             delay_minutes: 5,
           })
-        : await getRescheduleDemo(params)
+        : await postRescheduleDemo({
+            tournament,
+            original_schedule: originalSchedule,
+            ...params,
+          })
     if (type === 'coach_conflict') {
-      setOriginalSchedule(response.original_schedule)
-      setCurrentSchedule(response.repaired_schedule)
-      setChangedEvents(response.changed_events || [])
-      setEmergencySummary({
+      applyRepairResponse(response, {
         emergency_type: 'coach_conflict',
-        affectedResource: response.resource_locations?.[0]?.resource_id || 'auto-selected coach',
-        current_minute: response.current_minute ?? safeMinute,
-        duration_minutes: 5,
-      })
-      setRepairMetrics({
-        changed_match_count: response.changed_match_count ?? response.changed_events?.length ?? 0,
-        average_delay_minutes: response.average_delay_minutes ?? 0,
-        max_delay_minutes: response.max_delay_minutes ?? 0,
-        repair_strategy_used: response.repair_strategy_used,
-        queue_repair_applied: Boolean(response.queue_repair_applied),
-        local_swap_used: Boolean(response.local_swap_used),
-        global_reschedule_used: Boolean(response.global_reschedule_used),
-        explanation: response.explanation || '',
+        current_minute: safeMinute,
+        delay_minutes: 5,
       })
     } else {
       applyRescheduleResponse(response, params)
@@ -241,40 +320,23 @@ function App() {
       setError(null)
       setDivisionResourceLocations([])
 
+      if (!tournament || !originalSchedule.length) {
+        setDemoError('Generate or upload a tournament first.')
+        return
+      }
+
       if (demoKey === 'coach_delayed') {
         const coachDemoParams = {
           emergency_type: 'coach_conflict',
           current_minute: 0,
+          delay_minutes: 5,
         }
-        const [response, snapshot] = await Promise.all([
-          getRepairDemo(coachDemoParams),
-          getMockTournamentSnapshot(),
-        ])
-        setTournament(snapshot.tournament)
-        setOriginalSchedule(response.original_schedule)
-        setCurrentSchedule(response.repaired_schedule)
-        setChangedEvents(response.changed_events || [])
-        setNotifications(response.notifications)
-        setValidation(response.validation)
-        setScheduleChangeDetails(response.schedule_changes || [])
-        setRefereeAdjustments(response.referee_adjustments || [])
-        setCoordinationBoard(response.coordination_board || null)
-        setRepairMetrics({
-          changed_match_count: response.changed_match_count ?? response.changed_events?.length ?? 0,
-          average_delay_minutes: response.average_delay_minutes ?? 0,
-          max_delay_minutes: response.max_delay_minutes ?? 0,
-          repair_strategy_used: response.repair_strategy_used,
-          queue_repair_applied: Boolean(response.queue_repair_applied),
+        const response = await postRepairDemo({
+          tournament,
+          original_schedule: originalSchedule,
+          ...coachDemoParams,
         })
-        setDivisionDetail(response.division_detail)
-        setDivisionResourceLocations(response.resource_locations || [])
-        setEmergencySummary({
-          emergency_type: 'coach_conflict',
-          affectedResource: response.resource_locations?.[0]?.resource_id || 'auto-selected coach',
-          current_minute: response.current_minute ?? 0,
-          duration_minutes: 20,
-        })
-        setLiveMinute(response.current_minute ?? 0)
+        applyRepairResponse(response, coachDemoParams)
         setDemoResult(buildRepairDemoExplanation(response))
         return
       }
@@ -294,11 +356,11 @@ function App() {
               delay_minutes: 20,
               unavailable_duration_minutes: 20,
             }
-      const [response, snapshot] = await Promise.all([
-        getRescheduleDemo(formValues),
-        getMockTournamentSnapshot(),
-      ])
-      setTournament(snapshot.tournament)
+      const response = await postRescheduleDemo({
+        tournament,
+        original_schedule: originalSchedule,
+        ...formValues,
+      })
       applyRescheduleResponse(response, formValues)
       setDemoResult(buildRescheduleDemoExplanation(demoKey, response, formValues))
     } catch (demoRunError) {
@@ -475,40 +537,6 @@ function App() {
       }
     })
 
-    async function loadSnapshot() {
-      try {
-        const [snapshot, validationResult] = await Promise.all([
-          getMockTournamentSnapshot(),
-          getValidationSnapshot(),
-        ])
-        if (!isActive) {
-          return
-        }
-        setTournament(snapshot.tournament)
-        setOriginalSchedule(snapshot.schedule)
-        setCurrentSchedule(snapshot.schedule)
-        setChangedEvents([])
-        setNotifications(snapshot.notifications)
-        setValidation(validationResult)
-        setEmergencySummary(null)
-        setLiveMinute(0)
-        setError(null)
-        setScheduleChangeDetails([])
-        setRefereeAdjustments([])
-        setCoordinationBoard(null)
-        setRingOperationalHints({})
-        setRepairMetrics(null)
-        setLiveMinute(0)
-        setEventLog([])
-      } catch (loadError) {
-        if (isActive) {
-          setError(loadError.message)
-        }
-      }
-    }
-
-    void loadSnapshot()
-
     return () => {
       isActive = false
     }
@@ -526,6 +554,8 @@ function App() {
   const longOpStage =
     loadingEmergency
       ? 'optimizing schedule'
+      : loadingDemo === 'generate_tournament'
+        ? 'optimizing schedule'
       : loadingDemo === 'coach_delayed'
         ? 'optimizing schedule'
         : loadingDemo
@@ -534,6 +564,8 @@ function App() {
   const longOpLabel =
     loadingEmergency
       ? 'Reschedule demo running'
+      : loadingDemo === 'generate_tournament'
+        ? 'Generate demo tournament running'
       : loadingDemo === 'coach_delayed'
         ? 'Coach delay repair running'
         : loadingDemo === 'medical_pause'
@@ -563,6 +595,7 @@ function App() {
           tournament={tournament}
           schedule={currentSchedule}
           onRunDemo={handleRunDemo}
+          onGenerateDemo={handleGenerateDemoTournament}
           loadingDemo={loadingDemo}
           result={demoResult}
           error={demoError}

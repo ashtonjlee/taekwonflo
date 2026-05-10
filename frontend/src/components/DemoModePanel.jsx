@@ -8,6 +8,7 @@ export default function DemoModePanel({
   tournament = null,
   schedule = [],
   onRunDemo,
+  onGenerateDemo,
   loadingDemo = null,
   result = null,
   error = null,
@@ -25,7 +26,15 @@ export default function DemoModePanel({
             plain-English summary of the repair or reschedule decision.
           </p>
         </div>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          <button
+            type="button"
+            onClick={onGenerateDemo}
+            disabled={Boolean(loadingDemo)}
+            className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {loadingDemo === 'generate_tournament' ? 'Generating...' : 'Generate Demo Tournament'}
+          </button>
           <DemoButton demoKey="medical_pause" loadingDemo={loadingDemo} onRunDemo={onRunDemo} />
           <DemoButton demoKey="referee_shortage" loadingDemo={loadingDemo} onRunDemo={onRunDemo} />
           <DemoButton demoKey="coach_delayed" loadingDemo={loadingDemo} onRunDemo={onRunDemo} />

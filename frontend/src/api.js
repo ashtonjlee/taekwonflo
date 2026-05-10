@@ -62,12 +62,20 @@ export async function getMockTournamentSnapshot(params = {}) {
   return getJson(`/api/mock/snapshot${toQueryString(params)}`)
 }
 
+export async function generateDemoTournament(params = {}) {
+  return postJson(`/api/demo/tournament${toQueryString(params)}`, {})
+}
+
 export async function getValidationSnapshot(params = {}) {
   return getJson(`/api/validate/snapshot${toQueryString(params)}`)
 }
 
 export async function getRescheduleDemo(params = {}) {
   return getJson(`/api/reschedule/demo${toQueryString(params)}`)
+}
+
+export async function postRescheduleDemo(body) {
+  return postJson('/api/reschedule/apply', body)
 }
 
 export async function postLiveOperations(body) {
@@ -84,6 +92,10 @@ export async function postDivisionDetail(divisionId, body) {
 
 export async function getRepairDemo(params = {}) {
   return getJson(`/api/repair/demo${toQueryString(params)}`)
+}
+
+export async function postRepairDemo(body) {
+  return postJson('/api/repair/apply', body)
 }
 
 export async function importCsvTournament(file, params = {}) {

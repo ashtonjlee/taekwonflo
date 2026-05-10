@@ -109,13 +109,20 @@ def build_availability_index(
     schedule: list[RingSchedule],
     current_minute: int = 60,
 ) -> AvailabilityIndex:
+    """Build an availability index keyed to *match-level* start times.
+
+    Staging / holding / warmup windows are anchored to each match's own start_minute,
+    not the encompassing division event's start_minute. This is the change that lets
+    later-round matches occupy earlier slots inside their own division during local
+    repair without phantom conflicts (see docs/SCHEDULER_ARCHITECTURE_NOTES.md §2).
+    """
     index = AvailabilityIndex()
     athlete_by_id = {athlete.id: athlete for athlete in tournament.athletes}
     event_by_id = {event.event_id: event for event in tournament.events}
 
     for ring in schedule:
         for event in ring.events:
-            event_payload = event_by_id[event.event_id]
+            event_payload = event_by_id[event.source_event_id or event.event_id]
             matches = build_division_detail(
                 tournament=tournament,
                 schedule=schedule,
@@ -130,6 +137,8 @@ def build_availability_index(
                     event.assigned_referee_ids,
                 )
                 _add_match_locations(index, match, requirements)
+                # Use match.start_minute (not event.start_minute) so each match's staging
+                # window is local to that match, not the whole division event.
                 for athlete_id in athlete_ids_involved(match):
                     if athlete_id in athlete_by_id:
                         _add_staging_intervals(index, "athlete", athlete_id, match.start_minute, event.ring_id)

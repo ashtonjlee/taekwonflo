@@ -35,12 +35,13 @@ def build_division_detail(
     if not division:
         raise KeyError(division_id)
 
-    scheduled_event = next(
-        (event for ring in schedule for event in ring.events if event.division_id == division_id),
-        None,
+    scheduled_events = sorted(
+        [event for ring in schedule for event in ring.events if event.division_id == division_id],
+        key=lambda event: (event.start_minute, event.end_minute, event.event_id),
     )
-    if not scheduled_event:
+    if not scheduled_events:
         raise KeyError(f"scheduled event for {division_id}")
+    scheduled_event = scheduled_events[0]
 
     ring_name = scheduled_event.ring_name
     team_by_id = {team.id: team for team in tournament.teams}
@@ -61,15 +62,24 @@ def build_division_detail(
 
     if division.event_type == "kyorugi":
         label_order = _round_names_for_division(division, len(competitor_roster))
-        matches = _build_kyorugi_matches(
-            division,
-            competitor_roster,
-            scheduled_event,
-            current_minute,
-            ring_name,
-            label_order,
-            match_number_by_match_id=match_number_by_match_id,
-        )
+        if any(event.match_id for event in scheduled_events):
+            matches = _build_scheduled_kyorugi_matches(
+                division,
+                competitor_roster,
+                scheduled_events,
+                current_minute,
+                match_number_by_match_id=match_number_by_match_id,
+            )
+        else:
+            matches = _build_kyorugi_matches(
+                division,
+                competitor_roster,
+                scheduled_event,
+                current_minute,
+                ring_name,
+                label_order,
+                match_number_by_match_id=match_number_by_match_id,
+            )
         kyorugi_blocks = _assign_kyorugi_next_matches(matches, label_order)
         bracket_rounds = label_order
         kyorugi_losers = {
@@ -393,6 +403,83 @@ def _build_kyorugi_matches(
 
     _annotate_kyorugi_placeholder_labels(bouts, rounds[0])
     return sorted(bouts, key=lambda match: match.match_number)
+
+
+def _build_scheduled_kyorugi_matches(
+    division: Division,
+    competitors: list[MatchCompetitor],
+    scheduled_events: list[ScheduledEvent],
+    current_minute: int,
+    match_number_by_match_id: dict[str, int] | None = None,
+) -> list[Match]:
+    roster_lookup = {person.competitor_id: person for person in competitors}
+    event_by_match_id = {event.match_id: event for event in scheduled_events if event.match_id}
+    number_by_match_id: dict[str, int] = {}
+    for fallback, event in enumerate(scheduled_events, start=1):
+        if not event.match_id:
+            continue
+        number_by_match_id[event.match_id] = _resolve_match_number(
+            match_number_by_match_id,
+            event.match_id,
+            event.match_number or fallback,
+        )
+
+    bouts: list[Match] = []
+    for fallback, event in enumerate(scheduled_events, start=1):
+        if not event.match_id:
+            continue
+        known = [roster_lookup[item] for item in event.athlete_ids if item in roster_lookup]
+        competitor_one = _competitor_with_assigned_coach(known[0], match_id=event.match_id) if known else None
+        competitor_two = _competitor_with_assigned_coach(known[1], match_id=event.match_id) if len(known) > 1 else None
+        status = _match_status(event.start_minute, event.end_minute, current_minute)
+
+        winner: MatchCompetitor | None = None
+        loser_id: str | None = None
+        score: MatchScore | None = None
+        if competitor_one and competitor_two and status == "completed":
+            winner = _deterministic_winner(competitor_one, competitor_two, match_id=event.match_id, salt=fallback)
+            loser_id = competitor_one.competitor_id if winner.competitor_id == competitor_two.competitor_id else competitor_two.competitor_id
+            score = _kyorugi_score(fallback, winner, competitor_one, competitor_two)
+
+        match_number = number_by_match_id.get(event.match_id, event.match_number or fallback)
+        feeder_1_number = number_by_match_id.get(event.feeder_1_match_id or "")
+        feeder_2_number = number_by_match_id.get(event.feeder_2_match_id or "")
+        bouts.append(
+            _match(
+                division=division,
+                scheduled_event=event,
+                ring_name=event.ring_name,
+                round_name=event.round_name or "final",
+                bracket_position=event.bracket_position or fallback,
+                competitor_1=competitor_one,
+                competitor_2=competitor_two,
+                winner_id=winner.competitor_id if winner else None,
+                loser_id=loser_id,
+                score=score,
+                status=status,
+                start=event.start_minute,
+                end=event.end_minute,
+                match_index=fallback,
+                required_referee_count=event.required_referee_count,
+                match_id_override=event.match_id,
+                match_number=match_number,
+                feeder_1_match_number=feeder_1_number,
+                feeder_2_match_number=feeder_2_number,
+                assigned_referee_ids=list(event.assigned_referee_ids),
+            )
+        )
+
+    by_match_id = {match.match_id: match for match in bouts}
+    for match in bouts:
+        for candidate in bouts:
+            if candidate.feeder_1_match_number == match.match_number or candidate.feeder_2_match_number == match.match_number:
+                match.next_match_id = candidate.match_id
+                break
+
+    first_round = next((event.round_name for event in scheduled_events if event.match_id and not event.feeder_1_match_id and not event.feeder_2_match_id), None)
+    first_round = first_round or (division.round_structure or _round_names_for_division(division, len(competitors)) or ["final"])[0]
+    _annotate_kyorugi_placeholder_labels(bouts, first_round)
+    return sorted(bouts, key=lambda match: (match.start_minute, match.match_number, match.match_id))
 
 
 def _annotate_kyorugi_placeholder_labels(bouts: list[Match], first_round_label: str) -> None:
@@ -1002,10 +1089,10 @@ def audit_division_graph(
         cohort = len(division.athlete_ids)
         padded_bracket_size = bracket_power_of_two(cohort)
 
-        expected_bouts_total = padded_bracket_size - 1
+        expected_bouts_total = max(0, cohort - 1)
         if len(matches) != expected_bouts_total:
             errors.append(
-                f"Kyorugi match rows ({len(matches)}) should equal padded bracket minus one ({expected_bouts_total})."
+                f"Kyorugi match rows ({len(matches)}) should equal contested bracket bouts ({expected_bouts_total})."
             )
 
         head_to_head = [bout for bout in matches if not bout.bye]
@@ -1019,8 +1106,8 @@ def audit_division_graph(
 
         semis_only = [bout for bout in matches if bout.round_name == "semifinal"]
 
-        if padded_bracket_size >= 4 and len(semis_only) != 2:
-            errors.append("Semifinals must expose exactly two bouts unless bracket is finals-only sizing.")
+        if cohort >= 4 and len(semis_only) < 1:
+            errors.append("Kyorugi bracket must expose semifinal bouts before the final.")
 
         by_number = {bout.match_number: bout for bout in matches}
         for bout in matches:

@@ -103,13 +103,19 @@ class Tournament(BaseModel):
 
 class ScheduledEvent(BaseModel):
     event_id: str
+    source_event_id: str | None = None
     division_id: str
     division_name: str
     event_type: Literal["kyorugi", "poomsae", "pair_poomsae", "team_poomsae"]
     age_group: Literal["peewee", "cadet", "junior", "senior"] = "junior"
     belt_rank_group: Literal["color_belt", "black_belt", "world_class"] = "black_belt"
     weight_class: str = "Open"
+    match_id: str | None = None
     match_number: int | None = None
+    round_name: str | None = None
+    bracket_position: int | None = None
+    feeder_1_match_id: str | None = None
+    feeder_2_match_id: str | None = None
     ring_id: str
     ring_name: str
     referee_crew_id: str
