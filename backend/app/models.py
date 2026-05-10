@@ -72,6 +72,9 @@ class TournamentEvent(BaseModel):
     division_id: str
     division_name: str
     event_type: Literal["kyorugi", "poomsae", "pair_poomsae", "team_poomsae"]
+    age_group: Literal["peewee", "cadet", "junior", "senior"] = "junior"
+    belt_rank_group: Literal["color_belt", "black_belt", "world_class"] = "black_belt"
+    weight_class: str = "Open"
     athlete_ids: list[str]
     team_ids: list[str]
     required_coach_ids: list[str]
@@ -103,6 +106,10 @@ class ScheduledEvent(BaseModel):
     division_id: str
     division_name: str
     event_type: Literal["kyorugi", "poomsae", "pair_poomsae", "team_poomsae"]
+    age_group: Literal["peewee", "cadet", "junior", "senior"] = "junior"
+    belt_rank_group: Literal["color_belt", "black_belt", "world_class"] = "black_belt"
+    weight_class: str = "Open"
+    match_number: int | None = None
     ring_id: str
     ring_name: str
     referee_crew_id: str
@@ -116,6 +123,11 @@ class ScheduledEvent(BaseModel):
     team_ids: list[str]
     required_coach_ids: list[str]
     required_referee_count: int = Field(default=3, ge=1)
+    is_rescheduled: bool = False
+    original_ring_id: str | None = None
+    original_start_minute: int | None = None
+    delay_minutes: int = 0
+    changed_fields: list[str] = Field(default_factory=list)
     status: Literal["scheduled", "in_progress", "completed", "delayed"]
 
 
@@ -204,8 +216,14 @@ class RefereeAdjustment(BaseModel):
     from_crew_name: str = ""
     to_crew_id: str
     to_crew_name: str = ""
+    from_ring_id: str = ""
+    from_ring_name: str = ""
+    to_ring_id: str = ""
+    to_ring_name: str = ""
     ring_id: str = ""
     ring_name: str = ""
+    from_window_start_minute: int | None = None
+    from_window_end_minute: int | None = None
     window_start_minute: int | None = None
     window_end_minute: int | None = None
     scope: Literal["temporary", "rest_of_day"] = "temporary"
@@ -232,6 +250,14 @@ class RescheduleDemoResponse(BaseModel):
     schedule_changes: list[ScheduleChangeDetail] = Field(default_factory=list)
     referee_adjustments: list[RefereeAdjustment] = Field(default_factory=list)
     coordination_board: CoordinationBoard | None = None
+    changed_match_count: int = 0
+    average_delay_minutes: float = 0.0
+    max_delay_minutes: int = 0
+    repair_strategy_used: str = "global_reschedule"
+    queue_repair_applied: bool = False
+    demo_was_impactful: bool = True
+    demo_scenario_reason: str = ""
+    no_op_reason: str | None = None
 
 
 class MatchCompetitor(BaseModel):
@@ -245,6 +271,8 @@ class MatchCompetitor(BaseModel):
     belt_level: Literal["color_belt", "black_belt", "world_class"]
     coach_ids: list[str] = Field(default_factory=list)
     coach_names: list[str] = Field(default_factory=list)
+    assigned_coach_id: str | None = None
+    assigned_coach_name: str | None = None
 
 
 class MatchScore(BaseModel):
@@ -395,3 +423,11 @@ class RepairDemoResponse(BaseModel):
     schedule_changes: list[ScheduleChangeDetail] = Field(default_factory=list)
     referee_adjustments: list[RefereeAdjustment] = Field(default_factory=list)
     coordination_board: CoordinationBoard | None = None
+    current_minute: int = 0
+    changed_match_count: int = 0
+    average_delay_minutes: float = 0.0
+    max_delay_minutes: int = 0
+    queue_repair_applied: bool = False
+    demo_was_impactful: bool = True
+    demo_scenario_reason: str = ""
+    no_op_reason: str | None = None

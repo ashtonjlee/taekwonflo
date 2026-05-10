@@ -122,7 +122,7 @@ export default function DivisionDetailPanel({ detail, loading, error, resourceLo
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/40 p-4">
-      <section className="mt-6 w-full max-w-6xl rounded-xl bg-white shadow-2xl">
+      <section className="mt-6 flex max-h-[85vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
         <div className="flex items-start justify-between gap-4 border-b border-slate-200 p-5">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Division detail</p>
@@ -142,7 +142,7 @@ export default function DivisionDetailPanel({ detail, loading, error, resourceLo
           </button>
         </div>
 
-        <div className="p-5">
+        <div className="min-h-0 overflow-y-auto p-5">
           {loading ? <div className="rounded border border-blue-100 bg-blue-50 p-3 text-sm text-blue-900">Loading bracket details...</div> : null}
           {error ? <div className="rounded border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">{error}</div> : null}
 
@@ -168,7 +168,7 @@ export default function DivisionDetailPanel({ detail, loading, error, resourceLo
                   {tab === 'summary' ? (
                     <SummaryTab detail={detail} bracketType={bracketType} validation={validation} currentMatchHeading={currentMatchHeading} />
                   ) : null}
-                  {tab === 'queue' ? <QueueTab matches={queueMatches} scoreLabel={scoreLabel} participantsLabel={participantsLabel} /> : null}
+                  {tab === 'queue' ? <QueueTab matches={queueMatches} scoreLabel={scoreLabel} /> : null}
                   {tab === 'bracket' ? (
                     <BracketTab
                       kyorugiRounds={kyorugiRounds}
@@ -265,7 +265,7 @@ function ValidationPanel({ validation }) {
   )
 }
 
-function QueueTab({ matches, scoreLabel, participantsLabel }) {
+function QueueTab({ matches, scoreLabel }) {
   return (
     <div className="rounded-lg border border-slate-200">
       <div className="border-b border-slate-200 px-4 py-3">
@@ -379,29 +379,40 @@ function BracketTab({ kyorugiRounds, rankedRounds, fallbackMatches, competitorLa
 }
 
 function KyorugiBracketColumns({ rounds, competitorLabel, scoreLabel, focusedMatchId }) {
+  const firstRoundMatches = rounds?.[0]?.matches?.length || 1
+  const totalRows = Math.max(1, firstRoundMatches * 2 - 1)
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50/40 p-4">
+    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-slate-50/40 p-4">
       <div className="mb-4 text-xs text-slate-600">
         Horizontal knockout columns read earliest rounds on the left and later rounds toward the right.
       </div>
       <div className="flex min-h-[360px] min-w-max divide-x divide-slate-300">
-        {rounds.map((panel) => (
-          <div key={panel.round_name} className="flex min-w-[228px] flex-col justify-around px-4 py-3">
-            <div className="mb-6 text-center text-[11px] font-semibold uppercase tracking-wide text-slate-700">{panel.round_name}</div>
-            {(panel.matches || [])
-              .slice()
-              .sort((left, right) => left.bracket_position - right.bracket_position)
-              .map((match) => (
-                <div key={match.match_id} className="relative flex flex-col items-center gap-8">
-                  <KyorugiTreeCard
-                    match={match}
-                    competitorLabel={competitorLabel}
-                    scoreLabel={scoreLabel}
-                    focusedMatchId={focusedMatchId}
-                  />
-                  <span className="pointer-events-none absolute right-[-20px] top-1/2 hidden h-[2px] w-5 -translate-y-1/2 bg-slate-300 lg:block" />
-                </div>
-              ))}
+        {rounds.map((panel, roundIndex) => (
+          <div key={panel.round_name} className="min-w-[248px] px-4 py-3">
+            <div className="mb-3 text-center text-[11px] font-semibold uppercase tracking-wide text-slate-700">{panel.round_name}</div>
+            <div
+              className="grid gap-3"
+              style={{
+                gridTemplateRows: `repeat(${totalRows}, minmax(5.5rem, auto))`,
+              }}
+            >
+              {(panel.matches || [])
+                .slice()
+                .sort((left, right) => left.bracket_position - right.bracket_position)
+                .map((match, matchIndex) => {
+                  const rowStart = 2 ** roundIndex + matchIndex * 2 ** (roundIndex + 1)
+                  return (
+                    <div key={match.match_id} style={{ gridRowStart: rowStart }}>
+                      <KyorugiTreeCard
+                        match={match}
+                        competitorLabel={competitorLabel}
+                        scoreLabel={scoreLabel}
+                        focusedMatchId={focusedMatchId}
+                      />
+                    </div>
+                  )
+                })}
+            </div>
           </div>
         ))}
       </div>
@@ -435,6 +446,9 @@ function KyorugiTreeCard({ match, competitorLabel, scoreLabel, focusedMatchId })
         }`}
       >
         {left}
+        {match.competitor_1?.assigned_coach_name ? (
+          <div className="mt-1 text-[10px] font-medium text-slate-600">Coach {match.competitor_1.assigned_coach_name}</div>
+        ) : null}
       </div>
       <div
         className={`mt-1 rounded-md border px-2 py-2 ${
@@ -442,6 +456,9 @@ function KyorugiTreeCard({ match, competitorLabel, scoreLabel, focusedMatchId })
         }`}
       >
         {right}
+        {match.competitor_2?.assigned_coach_name ? (
+          <div className="mt-1 text-[10px] font-medium text-slate-600">Coach {match.competitor_2.assigned_coach_name}</div>
+        ) : null}
       </div>
       <div className="mt-2 text-[11px] text-slate-600">{scoreLabel(match)}</div>
       {match.next_match_id ? (
@@ -540,8 +557,13 @@ function SummaryCard({ label, value }) {
 function MatchCompetitorLine({ competitor, winnerId }) {
   const isWinner = competitor && competitor.competitor_id === winnerId
   return (
-    <div className={`flex items-center justify-between gap-3 rounded px-2 py-1 ${isWinner ? 'bg-emerald-50 text-emerald-900' : 'text-slate-700'}`}>
-      <span className="truncate">{competitorLabel(competitor)}</span>
+    <div className={`flex items-start justify-between gap-3 rounded px-2 py-1 ${isWinner ? 'bg-emerald-50 text-emerald-900' : 'text-slate-700'}`}>
+      <span className="min-w-0">
+        <span className="block truncate">{competitorLabel(competitor)}</span>
+        {competitor.assigned_coach_name ? (
+          <span className="block text-[10px] font-medium text-slate-600">Coach {competitor.assigned_coach_name}</span>
+        ) : null}
+      </span>
       {isWinner ? <span className="text-xs font-semibold uppercase">Advanced</span> : null}
     </div>
   )

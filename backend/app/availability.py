@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .brackets import athlete_ids_involved, build_division_detail
+from .brackets import assigned_coach_ids_involved, athlete_ids_involved, build_division_detail
 from .models import Match, RingSchedule, Tournament
 
 
@@ -130,6 +130,11 @@ def build_availability_index(
                     event.assigned_referee_ids,
                 )
                 _add_match_locations(index, match, requirements)
+                for athlete_id in athlete_ids_involved(match):
+                    if athlete_id in athlete_by_id:
+                        _add_staging_intervals(index, "athlete", athlete_id, match.start_minute, event.ring_id)
+                for coach_id in assigned_coach_ids_involved(match):
+                    _add_staging_intervals(index, "coach", coach_id, match.start_minute, event.ring_id)
             index.add_interval("ring", event.ring_id, event.start_minute, event.end_minute, event.event_id, event.ring_id)
             index.add_interval(
                 "referee_crew",
@@ -139,12 +144,6 @@ def build_availability_index(
                 event.event_id,
                 event.ring_id,
             )
-            for athlete_id in event.athlete_ids:
-                if athlete_id in athlete_by_id:
-                    _add_staging_intervals(index, "athlete", athlete_id, event.start_minute, event.ring_id)
-            for coach_id in event.required_coach_ids:
-                _add_staging_intervals(index, "coach", coach_id, event.start_minute, event.ring_id)
-
     return index
 
 
@@ -168,13 +167,16 @@ def resource_requirements_for_match(
 
 
 def coach_ids_for_match(tournament: Tournament, match: Match) -> list[str]:
+    assigned = assigned_coach_ids_involved(match)
+    if assigned:
+        return assigned
     athlete_by_id = {athlete.id: athlete for athlete in tournament.athletes}
-    aggregate: set[str] = set()
+    fallback: set[str] = set()
     for roster_id in athlete_ids_involved(match):
         athlete_row = athlete_by_id.get(roster_id)
-        if athlete_row:
-            aggregate.update(athlete_row.coach_ids)
-    return sorted(aggregate)
+        if athlete_row and athlete_row.coach_ids:
+            fallback.add(sorted(athlete_row.coach_ids)[0])
+    return sorted(fallback)
 
 
 def _add_match_locations(

@@ -71,6 +71,11 @@ Division detail optionally returns **`focused_match_id`** when the client passes
 
 `MatchCompetitor` may include `coach_ids` and `coach_names` for roster and reporting views.
 
+Each `MatchCompetitor` now also carries:
+
+- **`assigned_coach_id`** / **`assigned_coach_name`** — the active coach for that specific match-side or performance entry.  
+  Team-level coach pools remain available via `coach_ids`, but operational constraints and coach call sheets should use assigned match coaches.
+
 Division detail augmentations beyond `bracket.matches`:
 
 - `kyorugi_rounds`: layers of matches grouped by knockout round label (UI column layout).
@@ -85,7 +90,13 @@ Emergency repairs/reschedules can emit supplemental rows for the UI:
 - **`CoordinationBoard` / `CoordinatorMatchRow`**: per-match operational phase buckets (`warm_up_now`, `report_holding`, `report_staging`, `currently_competing`, `completed`) with urgency tiers (`now`, `soon`, `later`), ring/start metadata, rostered athletes/teams/coaches, and **`match_number`** for call scripts.
 - **`ScheduleChangeDetail`**: per changed scheduled event captures ring/time deltas, referee crew deltas, **`assigned_referee_ids` before/after**, coach/athlete involvement, textual match breakdown entries, plus **`affected_match_numbers`** for quick scanning.
 - **`RefereeAdjustment`**: granular moves when borrowing changes who covers a ring window (temporary versus rest-of-day scope).
-- **`POST /api/operations/live`** returns `coordination_board` plus **`ring_hints`**: collapsed ring summaries (current/next division labels, **`current_match_number` / `next_match_number`**, remaining events on the ring, **`material_reschedule_count`**, and **`total_delay_minutes`** derived from `changed_events`).
+- **`POST /api/operations/live`** returns `coordination_board` plus **`ring_hints`**: collapsed ring summaries (current/next division labels, **`current_match_number` / `next_match_number`**, remaining events on the ring, **`material_reschedule_count`**, and **`total_delay_minutes`** derived from `changed_events`). For stable numbering after repairs/reschedules, clients can include optional `original_schedule`; coordinator and ring hints keep the published-day `match_number` map.
+
+Frontend ring surfaces consume coordinator match rows as the primary ring timeline when available:
+
+- collapsed cards show current/next match number + division and remaining match count
+- expanded cards show next match rows (MVP: next 20) with a scrollable “show all” list for the ring’s remaining day
+- match rows include match number, division, round, athlete/entry display, assigned coaches, estimated start, and status
 
 Greedy referee rostering minimizes borrowing: crews are filled from their home members first and only spill to other qualified referees when shortages remain, which keeps `RefereeAdjustment` deltas small in the steady state.
 

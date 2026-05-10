@@ -15,6 +15,7 @@ import EmergencyControls from './components/EmergencyControls'
 import NotificationsPanel from './components/NotificationsPanel'
 import DivisionDetailPanel from './components/DivisionDetailPanel'
 import LiveReportsSection from './components/LiveReportsSection'
+import TimelineComparison from './components/TimelineComparison'
 
 function App() {
   const [health, setHealth] = useState({ status: 'loading' })
@@ -30,6 +31,8 @@ function App() {
   const [divisionDetailError, setDivisionDetailError] = useState(null)
   const [divisionResourceLocations, setDivisionResourceLocations] = useState([])
   const [demoResult, setDemoResult] = useState(null)
+  const [repairMetrics, setRepairMetrics] = useState(null)
+  const [activeView, setActiveView] = useState('dashboard')
   const [demoError, setDemoError] = useState(null)
   const [loadingDemo, setLoadingDemo] = useState(null)
   const [loadingEmergency, setLoadingEmergency] = useState(false)
@@ -62,6 +65,7 @@ function App() {
       const bucket = await postLiveOperations({
         tournament,
         schedule: currentSchedule,
+        original_schedule: originalSchedule,
         current_minute: minuteHint ?? emergencySummary?.current_minute ?? 0,
         changed_events: changedEvents,
       })
@@ -81,6 +85,13 @@ function App() {
     setScheduleChangeDetails(response.schedule_changes || [])
     setRefereeAdjustments(response.referee_adjustments || [])
     setCoordinationBoard(response.coordination_board || null)
+    setRepairMetrics({
+      changed_match_count: response.changed_match_count ?? response.changed_events?.length ?? 0,
+      average_delay_minutes: response.average_delay_minutes ?? 0,
+      max_delay_minutes: response.max_delay_minutes ?? 0,
+      repair_strategy_used: response.repair_strategy_used || 'global_reschedule',
+      queue_repair_applied: Boolean(response.queue_repair_applied),
+    })
     const changedEvent = response.changed_events[0]
     setEmergencySummary({
       emergency_type: formValues.emergency_type,
@@ -141,12 +152,19 @@ function App() {
         setScheduleChangeDetails(response.schedule_changes || [])
         setRefereeAdjustments(response.referee_adjustments || [])
         setCoordinationBoard(response.coordination_board || null)
+        setRepairMetrics({
+          changed_match_count: response.changed_match_count ?? response.changed_events?.length ?? 0,
+          average_delay_minutes: response.average_delay_minutes ?? 0,
+          max_delay_minutes: response.max_delay_minutes ?? 0,
+          repair_strategy_used: response.repair_strategy_used,
+          queue_repair_applied: Boolean(response.queue_repair_applied),
+        })
         setDivisionDetail(response.division_detail)
         setDivisionResourceLocations(response.resource_locations || [])
         setEmergencySummary({
           emergency_type: 'coach_conflict',
           affectedResource: response.resource_locations?.[0]?.resource_id || 'auto-selected coach',
-          current_minute: 0,
+          current_minute: response.current_minute ?? 0,
           duration_minutes: 20,
         })
         setDemoResult(buildRepairDemoExplanation(response))
@@ -195,6 +213,7 @@ function App() {
         title: 'Medical pause demo complete',
         strategyLabel: changedCount > 0 ? 'future-event reschedule' : 'no schedule movement needed',
         validationPassed,
+        metrics: buildResponseMetrics(response),
         whatHappened: `A medical pause was applied to ${formValues.ring_id} at T+${formValues.current_minute}.`,
         whatChanged:
           changedCount > 0
@@ -212,6 +231,7 @@ function App() {
       title: 'Referee shortage demo complete',
       strategyLabel: changedCount > 0 ? 'future-event reschedule' : 'no schedule movement needed',
       validationPassed,
+      metrics: buildResponseMetrics(response),
       whatHappened: `${formValues.referee_crew_id} was marked short during the demo window.`,
       whatChanged:
         changedCount > 0
@@ -222,6 +242,18 @@ function App() {
           ? 'The existing rescheduler preferred valid future assignments while preserving completed and active events.'
           : 'No match swap or event move was necessary because the shortage did not block a future assignment in this window.',
       emptyState: changedCount === 0 ? 'Empty state: the shortage window did not force a visible schedule change.' : null,
+    }
+  }
+
+  function buildResponseMetrics(response) {
+    const changed = response.changed_events || []
+    const delays = changed.map((event) => Math.max(0, event.new_start_minute - event.original_start_minute))
+    return {
+      changedMatchCount: response.changed_match_count ?? changed.length,
+      averageDelayMinutes:
+        response.average_delay_minutes ?? (delays.length ? Math.round((delays.reduce((sum, value) => sum + value, 0) / delays.length) * 10) / 10 : 0),
+      maxDelayMinutes: response.max_delay_minutes ?? Math.max(0, ...delays),
+      queueRepairApplied: Boolean(response.queue_repair_applied),
     }
   }
 
@@ -248,6 +280,12 @@ function App() {
       title: 'Coach delayed demo complete',
       strategyLabel: strategyText,
       validationPassed,
+      metrics: {
+        changedMatchCount: response.changed_match_count ?? (changedMatches || changedEventsCount),
+        averageDelayMinutes: response.average_delay_minutes ?? 0,
+        maxDelayMinutes: response.max_delay_minutes ?? 0,
+        queueRepairApplied: Boolean(response.queue_repair_applied),
+      },
       whatHappened: 'An auto-selected coach was delayed, so the repair layer checked whether another match could run first.',
       whatChanged:
         changedMatches > 0
@@ -316,6 +354,7 @@ function App() {
         setRefereeAdjustments([])
         setCoordinationBoard(null)
         setRingOperationalHints({})
+        setRepairMetrics(null)
       } catch (loadError) {
         if (isActive) {
           setError(loadError.message)
@@ -332,7 +371,7 @@ function App() {
 
   useEffect(() => {
     void hydrateLiveSignals(emergencySummary?.current_minute)
-  }, [tournament, currentSchedule, emergencySummary?.current_minute, changedEvents])
+  }, [tournament, currentSchedule, originalSchedule, emergencySummary?.current_minute, changedEvents])
 
   return (
     <div className="min-h-screen p-6">
@@ -357,25 +396,44 @@ function App() {
           result={demoResult}
           error={demoError}
         />
-        <ScheduleDashboard
-          originalSchedule={originalSchedule}
-          currentSchedule={currentSchedule}
-          changedEvents={changedEvents}
-          validation={validation}
-          emergencySummary={emergencySummary}
-          onSelectDivision={handleSelectDivision}
-          expandedRingIds={expandedRingIds}
-          onToggleRing={toggleRingExpanded}
-          ringOperationalHints={ringOperationalHints}
-          coordinationBoard={coordinationBoard}
-          tournament={tournament}
-        />
-        <LiveReportsSection
-          coordinationBoard={coordinationBoard}
-          scheduleChanges={scheduleChangeDetails}
-          refereeAdjustments={refereeAdjustments}
-          onCoordinatorSelect={handleSelectDivision}
-        />
+        <div className="flex flex-wrap gap-2 rounded-xl bg-white p-2 shadow">
+          <ViewTab id="dashboard" label="Schedule Dashboard" activeView={activeView} onSelect={setActiveView} />
+          <ViewTab id="timeline" label="Timeline Comparison" activeView={activeView} onSelect={setActiveView} />
+        </div>
+        {activeView === 'dashboard' ? (
+          <>
+            <ScheduleDashboard
+              originalSchedule={originalSchedule}
+              currentSchedule={currentSchedule}
+              changedEvents={changedEvents}
+              validation={validation}
+              emergencySummary={emergencySummary}
+              onSelectDivision={handleSelectDivision}
+              expandedRingIds={expandedRingIds}
+              onToggleRing={toggleRingExpanded}
+              ringOperationalHints={ringOperationalHints}
+              coordinationBoard={coordinationBoard}
+              tournament={tournament}
+            />
+            <LiveReportsSection
+              coordinationBoard={coordinationBoard}
+              scheduleChanges={scheduleChangeDetails}
+              refereeAdjustments={refereeAdjustments}
+              onCoordinatorSelect={handleSelectDivision}
+            />
+          </>
+        ) : (
+          <TimelineComparison
+            originalSchedule={originalSchedule}
+            currentSchedule={currentSchedule}
+            changedEvents={changedEvents}
+            emergencySummary={emergencySummary}
+            refereeAdjustments={refereeAdjustments}
+            coordinationBoard={coordinationBoard}
+            repairMetrics={repairMetrics}
+            onSelectDivision={handleSelectDivision}
+          />
+        )}
         <EmergencyControls
           tournament={tournament}
           onSimulate={handleEmergencySimulation}
@@ -392,6 +450,21 @@ function App() {
         onClose={handleCloseDivisionDetail}
       />
     </div>
+  )
+}
+
+function ViewTab({ id, label, activeView, onSelect }) {
+  const active = activeView === id
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(id)}
+      className={`rounded-md px-4 py-2 text-sm font-semibold transition-colors ${
+        active ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+      }`}
+    >
+      {label}
+    </button>
   )
 }
 

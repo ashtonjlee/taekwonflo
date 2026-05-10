@@ -60,6 +60,26 @@ function coordinatorEventLookups(coordinationBoard) {
   return { matchNumByEvent, focusMatchByEvent }
 }
 
+function coordinatorRingRows(coordinationBoard) {
+  const rows = coordinationBoard?.rows || []
+  const grouped = {}
+  for (const row of rows) {
+    if (!grouped[row.ring_id]) grouped[row.ring_id] = []
+    grouped[row.ring_id].push(row)
+  }
+  for (const ringId of Object.keys(grouped)) {
+    const seen = new Set()
+    grouped[ringId] = grouped[ringId]
+      .filter((row) => {
+        if (seen.has(row.match_id)) return false
+        seen.add(row.match_id)
+        return true
+      })
+      .sort((a, b) => (a.start_minute - b.start_minute) || (a.match_number - b.match_number))
+  }
+  return grouped
+}
+
 export default function ScheduleDashboard({
   originalSchedule = [],
   currentSchedule = [],
@@ -75,6 +95,10 @@ export default function ScheduleDashboard({
 }) {
   const { matchNumByEvent, focusMatchByEvent } = useMemo(
     () => coordinatorEventLookups(coordinationBoard),
+    [coordinationBoard],
+  )
+  const ringMatchRowsByRing = useMemo(
+    () => coordinatorRingRows(coordinationBoard),
     [coordinationBoard],
   )
 
@@ -286,6 +310,7 @@ export default function ScheduleDashboard({
             validationPassed={validationPassed}
             operationalHint={ringOperationalHints?.[ring.ring_id] ?? null}
             matchHintByEventId={matchNumByEvent}
+            matchRows={ringMatchRowsByRing[ring.ring_id] || []}
             tournament={tournament}
           />
         ))}

@@ -209,63 +209,69 @@ def _build_divisions_and_events(
 ) -> tuple[list[Division], list[TournamentEvent]]:
     del teams
     athlete_by_id = {athlete.id: athlete for athlete in athletes}
-    athlete_ids = [athlete.id for athlete in athletes]
-    base_divisions = params.number_of_divisions
-    crossover_ids = rng.sample(athlete_ids, k=min(max(12, len(athlete_ids) // 10), len(athlete_ids)))
-
     divisions: list[Division] = []
     events: list[TournamentEvent] = []
+    all_specs = _division_specs()
+    kyorugi_specs = [spec for spec in all_specs if spec["event_type"] == "kyorugi"]
+    poomsae_specs = [spec for spec in all_specs if spec["event_type"] != "kyorugi"]
+    rng.shuffle(kyorugi_specs)
+    rng.shuffle(poomsae_specs)
 
-    for division_index in range(base_divisions):
-        event_type = EVENT_TYPES[division_index % len(EVENT_TYPES)]
-        requested_size = DIVISION_SIZE_PATTERN[division_index % len(DIVISION_SIZE_PATTERN)]
-        age_group = AGE_GROUPS[division_index % len(AGE_GROUPS)]
-        gender = GENDERS[(division_index // 2) % len(GENDERS)]
-        belt_level = BELT_LEVELS[(division_index // 3) % len(BELT_LEVELS)]
-        weight_class = _weight_class(event_type, age_group, gender, division_index)
-        eligible_ids = [
-            athlete.id
-            for athlete in athletes
-            if athlete.age_group == age_group and athlete.gender == gender and athlete.belt_level == belt_level
-        ]
-        if len(eligible_ids) < 2:
-            eligible_ids = [
-                athlete.id
-                for athlete in athletes
-                if athlete.age_group == age_group and athlete.gender == gender
-            ]
-        if len(eligible_ids) < 2:
-            eligible_ids = athlete_ids
+    requested = params.number_of_divisions
+    kyorugi_target = min(len(kyorugi_specs), max(1, round(requested * 0.72)))
+    selected_specs = kyorugi_specs[:kyorugi_target]
+    need_more = requested - len(selected_specs)
+    if need_more > 0:
+        selected_specs.extend(poomsae_specs[:need_more])
+    if len(selected_specs) < requested:
+        leftovers = [spec for spec in all_specs if spec not in selected_specs]
+        selected_specs.extend(leftovers[: requested - len(selected_specs)])
+    selected_specs = selected_specs[:requested]
 
+    duplicate_counts: dict[str, int] = {}
+
+    for division_index, spec in enumerate(selected_specs, start=1):
+        event_type = spec["event_type"]
+        age_group = spec["age_group"]
+        gender = spec["gender"]
+        belt_level = spec["belt_level"]
+        weight_class = spec["weight_class"]
+        division_gender = spec["division_gender"]
+
+        eligible_ids = _eligible_athletes(athletes, spec)
+        requested_size = _target_size(event_type, rng)
         size = min(requested_size, len(eligible_ids))
         if size < 2:
             continue
 
-        selected_set = set(rng.sample(eligible_ids, k=size))
-        if division_index < len(crossover_ids):
-            selected_set.add(crossover_ids[division_index])
-        if division_index % 2 == 0 and crossover_ids:
-            selected_set.add(crossover_ids[(division_index + 1) % len(crossover_ids)])
-
-        while len(selected_set) < size:
-            selected_set.add(rng.choice(eligible_ids))
-        selected_athletes = sorted(rng.sample(list(selected_set), k=size))
-
+        selected_athletes = sorted(rng.sample(eligible_ids, k=size))
         canonical_ids = _normalize_demo_roster(event_type, selected_athletes)
-
         if not canonical_ids:
-
             continue
-
         selected_athletes = canonical_ids
-
         final_size = len(selected_athletes)
 
-        division_id = f"division-{division_index + 1}"
-        division_name = _division_name(division_index + 1, event_type, final_size, age_group, gender, weight_class)
+        base_name = _division_name(
+            event_type=event_type,
+            age_group=age_group,
+            gender=division_gender,
+            belt_level=belt_level,
+            weight_class=weight_class,
+        )
+        duplicate_counts[base_name] = duplicate_counts.get(base_name, 0) + 1
+        flight_label = _flight_name(duplicate_counts[base_name]) if duplicate_counts[base_name] > 1 else None
+        division_name = f"{base_name} {flight_label}" if flight_label else base_name
+
+        division_id = f"division-{division_index}"
         division_athletes = [athlete_by_id[athlete_id] for athlete_id in selected_athletes]
         team_ids = sorted({athlete.team_id for athlete in division_athletes})
-        required_coach_ids = sorted({coach_id for athlete in division_athletes for coach_id in athlete.coach_ids})
+        required_coach_ids = sorted(
+            {
+                _primary_coach_for_event(athlete, division_id, event_type)
+                for athlete in division_athletes
+                if _primary_coach_for_event(athlete, division_id, event_type)
+            }
+        )
 
         estimated_duration_minutes = _estimate_duration(event_type, final_size, belt_level)
         buffer_minutes = _buffer_minutes(event_type, final_size)
@@ -273,7 +279,6 @@ def _build_divisions_and_events(
         poomsae_rounds = _poomsae_rounds(event_type, final_size)
         round_structure = _round_structure(event_type, final_size)
         required_referee_count = _required_referee_count(event_type, final_size)
-        division_gender = "coed" if event_type in {"pair_poomsae", "team_poomsae"} else gender
         bracket_size = _bracket_size(event_type, final_size)
 
         divisions.append(
@@ -298,10 +303,13 @@ def _build_divisions_and_events(
         )
         events.append(
             TournamentEvent(
-                event_id=f"event-{division_index + 1}",
+                event_id=f"event-{division_index}",
                 division_id=division_id,
                 division_name=division_name,
                 event_type=event_type,
+                age_group=age_group,
+                belt_rank_group=belt_level,
+                weight_class=weight_class,
                 athlete_ids=selected_athletes,
                 team_ids=team_ids,
                 required_coach_ids=required_coach_ids,
@@ -311,73 +319,6 @@ def _build_divisions_and_events(
                 status="unscheduled",
             )
         )
-
-    # Ensure some athletes are explicitly present in multiple events.
-    if events and crossover_ids:
-        for idx, athlete_id in enumerate(crossover_ids[:3]):
-            target_event = events[idx % len(events)]
-
-            matching_division = next(div_item for div_item in divisions if div_item.id == target_event.division_id)
-
-            athlete_roster_snapshot = sorted(set(target_event.athlete_ids + [athlete_id]))
-
-            normalized_bundle = sorted(_normalize_demo_roster(matching_division.event_type, athlete_roster_snapshot))
-
-            if len(normalized_bundle) < (2 if matching_division.event_type == "pair_poomsae" else (3 if matching_division.event_type == "team_poomsae" else 2)):
-
-                continue
-
-            target_event.athlete_ids = normalized_bundle
-
-            crew_roster = [athlete_by_id[aid_token] for aid_token in normalized_bundle]
-
-            target_event.team_ids = sorted({person.team_id for person in crew_roster})
-
-            target_event.required_coach_ids = sorted({cid for person in crew_roster for cid in person.coach_ids})
-
-            belt_signal_used = crew_roster[0].belt_level if crew_roster else matching_division.belt_level
-
-            matching_division.athlete_ids = normalized_bundle
-
-            matching_division.team_ids = target_event.team_ids
-
-            matching_division.competitor_count = len(normalized_bundle)
-
-            matching_division.bracket_size = _bracket_size(matching_division.event_type, matching_division.competitor_count)
-
-            matching_division.poomsae_rounds = _poomsae_rounds(matching_division.event_type, matching_division.competitor_count)
-
-            matching_division.round_structure = _round_structure(matching_division.event_type, matching_division.competitor_count)
-
-            matching_division.estimated_duration_minutes = _estimate_duration(
-                matching_division.event_type,
-
-                matching_division.competitor_count,
-
-                belt_signal_used,
-
-            )
-
-            target_event.estimated_duration_minutes = matching_division.estimated_duration_minutes
-
-            target_event.required_referee_count = _required_referee_count(matching_division.event_type, matching_division.competitor_count)
-
-
-    # Keep division and event names consistent with the final athlete counts.
-    event_by_division_id = {ev.division_id: ev for ev in events}
-    for division_index, division in enumerate(divisions, start=1):
-        final_size = len(division.athlete_ids)
-        final_name = _division_name(
-            division_index,
-            division.event_type,
-            final_size,
-            division.age_group,
-            division.gender,
-            division.weight_class,
-        )
-        division.name = final_name
-        event_by_division_id[division.id].division_name = final_name
-        division.competitor_count = final_size
 
     _scale_event_durations(events, divisions, params)
 
@@ -402,15 +343,25 @@ def _estimate_duration(event_type: str, size: int, belt_level: str) -> int:
     return 10 + max(1, rounds - 1) * round(size * 3.0) + min(size, 8) * 5
 
 
-def _division_name(index: int, event_type: str, size: int, age_group: str, gender: str, weight_class: str) -> str:
-    type_label = {
-        "kyorugi": "Kyorugi",
-        "poomsae": "Poomsae",
+def _division_name(
+    *,
+    event_type: str,
+    age_group: str,
+    gender: str,
+    belt_level: str,
+    weight_class: str,
+) -> str:
+    belt_label = _belt_label(belt_level)
+    age_label = age_group.title()
+    gender_label = "Coed" if gender in {"coed", "mixed"} else gender.title()
+    if event_type == "kyorugi":
+        return f"{age_label} {gender_label} {belt_label} {_weight_label(weight_class)} Kyorugi"
+    event_label = {
+        "poomsae": "Individual Poomsae",
         "pair_poomsae": "Pair Poomsae",
         "team_poomsae": "Team Poomsae",
     }[event_type]
-    class_label = weight_class if event_type == "kyorugi" else "Open"
-    return f"{age_group.title()} {gender.title()} {class_label} {type_label} {index} ({size} competitors)"
+    return f"{age_label} {gender_label} {belt_label} {event_label}"
 
 
 def _weight_class(event_type: str, age_group: str, gender: str, division_index: int) -> str:
@@ -437,6 +388,10 @@ def _poomsae_rounds(event_type: str, roster_size: int) -> list[str]:
     if units <= 0:
         return ["final"]
 
+    if units >= 36:
+        return ["preliminary flight A", "preliminary flight B", "preliminary flight C", "semifinal", "final"]
+    if units >= 24:
+        return ["preliminary flight A", "preliminary flight B", "semifinal", "final"]
     return rounds_for_ranked_entries(units)
 
 
@@ -478,6 +433,111 @@ def _round_structure(event_type: str, size: int) -> list[str]:
     if bracket_size <= 8:
         return ["quarterfinal", "semifinal", "final"]
     return ["round of 16", "quarterfinal", "semifinal", "final"]
+
+
+def _division_specs() -> list[dict[str, str]]:
+    specs: list[dict[str, str]] = []
+    for age_group in AGE_GROUPS:
+        for gender in GENDERS:
+            for belt_level in BELT_LEVELS:
+                for wc in KYORUGI_WEIGHT_CLASSES[age_group][gender]:
+                    specs.append(
+                        {
+                            "event_type": "kyorugi",
+                            "age_group": age_group,
+                            "gender": gender,
+                            "division_gender": gender,
+                            "belt_level": belt_level,
+                            "weight_class": wc,
+                        }
+                    )
+
+    for age_group in AGE_GROUPS:
+        for belt_level in BELT_LEVELS:
+            for gender in GENDERS:
+                specs.append(
+                    {
+                        "event_type": "poomsae",
+                        "age_group": age_group,
+                        "gender": gender,
+                        "division_gender": gender,
+                        "belt_level": belt_level,
+                        "weight_class": "Open",
+                    }
+                )
+            for event_type in ("pair_poomsae", "team_poomsae"):
+                specs.append(
+                    {
+                        "event_type": event_type,
+                        "age_group": age_group,
+                        "gender": "mixed",
+                        "division_gender": "coed",
+                        "belt_level": belt_level,
+                        "weight_class": "Open",
+                    }
+                )
+    return specs
+
+
+def _eligible_athletes(athletes: list[Athlete], spec: dict[str, str]) -> list[str]:
+    event_type = spec["event_type"]
+    age_group = spec["age_group"]
+    belt_level = spec["belt_level"]
+    gender = spec["gender"]
+    if event_type in {"pair_poomsae", "team_poomsae"}:
+        pool = [a.id for a in athletes if a.age_group == age_group and a.belt_level == belt_level]
+    else:
+        pool = [
+            a.id
+            for a in athletes
+            if a.age_group == age_group
+            and a.belt_level == belt_level
+            and (event_type != "kyorugi" or a.gender == gender)
+            and (event_type == "kyorugi" or a.gender == gender)
+        ]
+    if len(pool) >= 2:
+        return pool
+    return [a.id for a in athletes if a.age_group == age_group and a.belt_level == belt_level] or [a.id for a in athletes]
+
+
+def _target_size(event_type: str, rng: random.Random) -> int:
+    if event_type == "kyorugi":
+        return rng.choice([2, 3, 4, 5, 6, 8])
+    if event_type == "poomsae":
+        return rng.choice([8, 10, 12, 16, 20, 24])
+    if event_type == "pair_poomsae":
+        return rng.choice([6, 8, 10, 12, 14, 16])
+    return rng.choice([6, 9, 12, 15, 18])
+
+
+def _primary_coach_for_event(athlete: Athlete, division_id: str, event_type: str) -> str | None:
+    if not athlete.coach_ids:
+        return None
+    ordered = sorted(athlete.coach_ids)
+    token = f"{athlete.id}:{division_id}:{event_type}"
+    return ordered[sum(ord(ch) for ch in token) % len(ordered)]
+
+
+def _belt_label(belt_level: str) -> str:
+    return {
+        "color_belt": "Color Belt",
+        "black_belt": "Black Belt",
+        "world_class": "World Class",
+    }.get(belt_level, belt_level.replace("_", " ").title())
+
+
+def _weight_label(weight_class: str) -> str:
+    if weight_class in {"Open", "Light", "Middle", "Heavy"}:
+        return weight_class
+    if weight_class.startswith(("+", "-")) and weight_class[1:].isdigit():
+        return f"{weight_class}kg"
+    return weight_class
+
+
+def _flight_name(flight_index: int) -> str:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    slot = (flight_index - 2) % len(alphabet)
+    return f"Flight {alphabet[slot]}"
 
 
 def _scale_event_durations(

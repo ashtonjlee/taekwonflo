@@ -269,6 +269,18 @@ def build_optimized_schedule(tournament: Tournament, solver_time_limit_seconds: 
     lunch_cost_terms.extend(lunch_cross_penalties)
 
     lunch_cost = cp_model.LinearExpr.Sum(lunch_cost_terms) if lunch_cost_terms else 0
+    poomsae_types = {"poomsae", "pair_poomsae", "team_poomsae"}
+    kyorugi_event_indexes = [idx for idx, evt in enumerate(tournament.events) if evt.event_type == "kyorugi"]
+    poomsae_event_indexes = [idx for idx, evt in enumerate(tournament.events) if evt.event_type in poomsae_types]
+    for k_idx in kyorugi_event_indexes:
+        for p_idx in poomsae_event_indexes:
+            for ring_idx in range(num_rings):
+                model.Add(evt_vars[k_idx].start >= evt_vars[p_idx].end).OnlyEnforceIf(
+                    [
+                        evt_vars[k_idx].ring_is_assigned[ring_idx],
+                        evt_vars[p_idx].ring_is_assigned[ring_idx],
+                    ]
+                )
 
     model.Minimize(
         makespan * 75_000_000
@@ -324,6 +336,9 @@ def _build_schedule_response(
             division_id=event.division_id,
             division_name=event.division_name,
             event_type=event.event_type,
+            age_group=event.age_group,
+            belt_rank_group=event.belt_rank_group,
+            weight_class=event.weight_class,
             ring_id=ring.id,
             ring_name=ring.name,
             referee_crew_id=crew.id,

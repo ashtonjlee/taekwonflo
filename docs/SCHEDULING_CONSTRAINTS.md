@@ -78,6 +78,8 @@ Entire divisions **do not** have to remain on a single ring.
 ## 6. Coach constraints
 
 - A coach **cannot** be required in **two places at once** (no overlapping coach obligations across rings).
+- Each match-side (kyorugi) or performance entry (poomsae/pair/team) should carry **one active assigned coach** for that unit (`assigned_coach_id`).
+- Team-level coach pools remain available (`coach_ids`), but scheduling/availability should use the **assigned match coach**, not all team coaches at once.
 - **Single-coach teams:** avoid scheduling that team’s athletes in **multiple rings at the same time** when those athletes need that coach.
 - **Coach delay** response hierarchy (prefer **smallest** change):
   1. **Match-level repair** within the division (next eligible match that respects bracket and resources).
@@ -195,13 +197,25 @@ All material changes should surface in **coordinator-facing summaries** (ring/ti
 
 - **Rings** default **collapsed**.
 - **Collapsed** ring card shows:
-  - current match/division label
-  - next match/division label
-  - remaining count (matches or flights, per product choice)
+  - current **match number + division**
+  - next **match number + division**
+  - current status
+  - remaining match/flight count
   - delays / rescheduled counts (and total delay where applicable)
-- **Expand** ring to see the full ordered schedule for that ring.
+- **Expand** ring to see the next match-level units (for MVP, next 20) plus a way to open all remaining ring matches in a scrollable panel.
 - **Click** division/match row → **detail panel** (bracket, queue, coaches).
 - **Bracket** view: standard **tournament bracket** layout (columns, connectors), with **Winner of Match N** for undecided feeders.
+
+## 15. Division naming + duplicate policy
+
+- Division names must include event-defining metadata:
+  - **Kyorugi:** age group, gender, belt rank, weight class, event type  
+    (e.g. `Junior Male Black Belt -59kg Kyorugi`)
+  - **Poomsae:** age group, gender/coed, belt rank, event type  
+    (e.g. `Cadet Female Color Belt Individual Poomsae`)
+- Avoid duplicate division names unless intentionally flighted.
+- If duplicate buckets are needed, append explicit flight suffixes (`Flight A`, `Flight B`, ...).
+- For large poomsae fields, prefer one division with flighted round structure over repeated identical standalone divisions.
 
 ---
 

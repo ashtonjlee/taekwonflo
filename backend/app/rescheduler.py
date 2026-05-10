@@ -170,12 +170,29 @@ def reoptimize_future_events(
         crew_index=crew_index,
     )
 
+    poomsae_types = {"poomsae", "pair_poomsae", "team_poomsae"}
+    future_kyorugi_events = [
+        event for event in future_events if tournament_event_by_id[event.event_id].event_type == "kyorugi"
+    ]
+    future_poomsae_events = [
+        event for event in future_events if tournament_event_by_id[event.event_id].event_type in poomsae_types
+    ]
+    for k_event in future_kyorugi_events:
+        k_vars = future_vars[k_event.event_id]
+        for p_event in future_poomsae_events:
+            p_vars = future_vars[p_event.event_id]
+            for ring_idx in range(num_rings):
+                model.Add(k_vars.start >= p_vars.end).OnlyEnforceIf(
+                    [k_vars.ring_is_assigned[ring_idx], p_vars.ring_is_assigned[ring_idx]]
+                )
+
     # Objective with change penalties.
     makespan = model.NewIntVar(0, horizon, "reschedule_makespan")
     model.AddMaxEquality(makespan, [future_vars[event.event_id].end for event in future_events] + [model.NewConstant(0)])
 
     ring_change_terms: list[cp_model.BoolVar] = []
     crew_change_terms: list[cp_model.BoolVar] = []
+    start_changed_terms: list[cp_model.BoolVar] = []
     start_shift_terms: list[cp_model.IntVar] = []
     shortage_overlap_terms: list[cp_model.IntVar] = []
 
@@ -197,6 +214,10 @@ def reoptimize_future_events(
         shift = model.NewIntVar(0, horizon, f"{event.event_id}_start_shift")
         model.AddAbsEquality(shift, vars_for_event.start - event.start_minute)
         start_shift_terms.append(shift)
+        start_changed = model.NewBoolVar(f"{event.event_id}_start_changed")
+        model.Add(shift == 0).OnlyEnforceIf(start_changed.Not())
+        model.Add(shift >= 1).OnlyEnforceIf(start_changed)
+        start_changed_terms.append(start_changed)
 
         if config.emergency_type == "referee_shortage":
             payload = tournament_event_by_id[event.event_id]
@@ -220,16 +241,18 @@ def reoptimize_future_events(
         for idx in range(num_crews):
             model.AddHint(vars_for_event.crew_is_assigned[idx], 1 if idx == original_crew_idx else 0)
 
-    ring_change_weight = 250_000 if config.emergency_type in {"medical_delay", "ring_pause"} else 50_000
-    crew_change_weight = 80_000 if config.emergency_type == "referee_shortage" else 50_000
-    start_shift_weight = 300 if config.emergency_type in {"medical_delay", "ring_pause"} else 200
+    changed_event_weight = 25_000_000
+    ring_change_weight = 5_000_000 if config.emergency_type in {"medical_delay", "ring_pause"} else 3_000_000
+    crew_change_weight = 5_000_000 if config.emergency_type == "referee_shortage" else 3_000_000
+    start_shift_weight = 25_000 if config.emergency_type in {"medical_delay", "ring_pause"} else 20_000
 
     model.Minimize(
-        makespan * 1_000_000
-        + sum(ring_change_terms) * ring_change_weight
+        sum(start_changed_terms) * changed_event_weight
         + sum(crew_change_terms) * crew_change_weight
+        + sum(ring_change_terms) * ring_change_weight
         + sum(start_shift_terms) * start_shift_weight
         + sum(shortage_overlap_terms) * 20_000
+        + makespan
     )
 
     solver = cp_model.CpSolver()
@@ -258,6 +281,9 @@ def reoptimize_future_events(
                 division_id=payload.division_id,
                 division_name=payload.division_name,
                 event_type=payload.event_type,
+                age_group=payload.age_group,
+                belt_rank_group=payload.belt_rank_group,
+                weight_class=payload.weight_class,
                 ring_id=ring.id,
                 ring_name=ring.name,
                 referee_crew_id=crew.id,

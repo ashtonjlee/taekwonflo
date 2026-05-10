@@ -29,6 +29,7 @@ def build_division_detail(
     division_id: str,
     current_minute: int = 60,
     focus_match_id: str | None = None,
+    match_number_by_match_id: dict[str, int] | None = None,
 ) -> DivisionDetail:
     division = next((item for item in tournament.divisions if item.id == division_id), None)
     if not division:
@@ -60,7 +61,15 @@ def build_division_detail(
 
     if division.event_type == "kyorugi":
         label_order = _round_names_for_division(division, len(competitor_roster))
-        matches = _build_kyorugi_matches(division, competitor_roster, scheduled_event, current_minute, ring_name, label_order)
+        matches = _build_kyorugi_matches(
+            division,
+            competitor_roster,
+            scheduled_event,
+            current_minute,
+            ring_name,
+            label_order,
+            match_number_by_match_id=match_number_by_match_id,
+        )
         kyorugi_blocks = _assign_kyorugi_next_matches(matches, label_order)
         bracket_rounds = label_order
         kyorugi_losers = {
@@ -70,7 +79,15 @@ def build_division_detail(
         }
     else:
         matches, ranked_blocks = _build_ranked_rounds(
-            division, competitor_roster, tournament, team_by_id, coach_lookup, scheduled_event, current_minute, ring_name
+            division,
+            competitor_roster,
+            tournament,
+            team_by_id,
+            coach_lookup,
+            scheduled_event,
+            current_minute,
+            ring_name,
+            match_number_by_match_id=match_number_by_match_id,
         )
         bracket_rounds = [panel.round_name for panel in ranked_blocks]
         kyorugi_losers = set()
@@ -178,6 +195,14 @@ def athlete_ids_involved(match_record: Match) -> list[str]:
     return bundle
 
 
+def assigned_coach_ids_involved(match_record: Match) -> list[str]:
+    coach_ids: set[str] = set()
+    for side in (match_record.competitor_1, match_record.competitor_2):
+        if side and side.assigned_coach_id:
+            coach_ids.add(side.assigned_coach_id)
+    return sorted(coach_ids)
+
+
 def competitor_ids_for_audit(match_record: Match) -> list[str]:
     """Known lineup only (revealed competitors — excludes placeholders)."""
     ids: list[str] = []
@@ -232,6 +257,7 @@ def _build_kyorugi_matches(
     current_minute: int,
     ring_name: str,
     rounds: list[str],
+    match_number_by_match_id: dict[str, int] | None = None,
 ) -> list[Match]:
     roster_lookup = {person.competitor_id: person for person in competitors}
     bracket_size = 1 << math.ceil(math.log2(max(2, len(competitors))))
@@ -254,8 +280,14 @@ def _build_kyorugi_matches(
         duel_state = _match_status(start_slice, stop_slice, current_minute)
 
         bye_path = left_corner is None or right_corner is None
-        display_one = left_corner if left_corner else right_corner
-        display_two = right_corner if left_corner and right_corner else None
+        display_one = _competitor_with_assigned_coach(
+            left_corner if left_corner else right_corner,
+            match_id=f"{division.id}-ky-{rounds[0]}-{pairing // 2 + 1}",
+        )
+        display_two = _competitor_with_assigned_coach(
+            right_corner if left_corner and right_corner else None,
+            match_id=f"{division.id}-ky-{rounds[0]}-{pairing // 2 + 1}",
+        )
 
         victor: MatchCompetitor | None = None
         fail_id: str | None = None
@@ -273,6 +305,7 @@ def _build_kyorugi_matches(
                 else MatchScore(winner_margin="bye")
             )
 
+        match_id = f"{division.id}-ky-{rounds[0]}-{pairing // 2 + 1}"
         bout = _match(
             division=division,
             scheduled_event=scheduled_event,
@@ -289,8 +322,8 @@ def _build_kyorugi_matches(
             end=stop_slice,
             match_index=sequence,
             required_referee_count=3,
-            match_id_override=f"{division.id}-ky-{rounds[0]}-{pairing // 2 + 1}",
-            match_number=sequence,
+            match_id_override=match_id,
+            match_number=_resolve_match_number(match_number_by_match_id, match_id, sequence),
             bye_flag=bye_path,
             feeder_1_match_number=None,
             feeder_2_match_number=None,
@@ -324,9 +357,10 @@ def _build_kyorugi_matches(
                 loser_token = lw.competitor_id if victor.competitor_id == rw.competitor_id else rw.competitor_id
                 score_line = _kyorugi_score(sequence, victor, lw, rw)
 
-            competitor_one = lw
-            competitor_two = rw
+            competitor_one = _competitor_with_assigned_coach(lw, match_id=f"{division.id}-ky-{label}-{offset // 2 + 1}")
+            competitor_two = _competitor_with_assigned_coach(rw, match_id=f"{division.id}-ky-{label}-{offset // 2 + 1}")
 
+            match_id = f"{division.id}-ky-{label}-{offset // 2 + 1}"
             bout = _match(
                 division=division,
                 scheduled_event=scheduled_event,
@@ -343,8 +377,8 @@ def _build_kyorugi_matches(
                 end=slice_stop,
                 match_index=sequence,
                 required_referee_count=3,
-                match_id_override=f"{division.id}-ky-{label}-{offset // 2 + 1}",
-                match_number=sequence,
+                match_id_override=match_id,
+                match_number=_resolve_match_number(match_number_by_match_id, match_id, sequence),
                 bye_flag=False,
                 feeder_1_match_number=left_feed.match_number,
                 feeder_2_match_number=right_feed.match_number,
@@ -420,10 +454,11 @@ def _build_ranked_rounds(
     scheduled_segment: ScheduledEvent,
     current_minute: int,
     ring_name: str,
+    match_number_by_match_id: dict[str, int] | None = None,
 ) -> tuple[list[Match], list[RankedBracketRound]]:
     entries = build_poomsae_entries(division, tournament, team_bundle, coach_bundle)
 
-    roadmap = rounds_for_ranked_entries(len(entries))
+    roadmap = list(division.poomsae_rounds or rounds_for_ranked_entries(len(entries)))
     workloads = len(entries) * len(roadmap)
 
     slices = max(5, scheduled_segment.estimated_duration_minutes // max(1, workloads))
@@ -465,9 +500,10 @@ def _build_ranked_rounds(
 
             pace = _match_status(window_start, window_stop, current_minute)
 
-            figurehead = specimen.to_aggregate_competitor()
-
             duel_label = f"{division.id}-{milestone}-{specimen.entry_id}-r{ladder_pos}"
+            figurehead = _competitor_with_assigned_coach(specimen.to_aggregate_competitor(), match_id=duel_label)
+            assigned_entry_coach_ids = [figurehead.assigned_coach_id] if figurehead.assigned_coach_id else []
+            assigned_entry_coach_names = [figurehead.assigned_coach_name] if figurehead.assigned_coach_name else []
 
             rank_rows.append(
                 RankedBracketEntry(
@@ -477,8 +513,8 @@ def _build_ranked_rounds(
                     athlete_members=list(specimen.members),
                     team_id=specimen.team_id,
                     team_name=specimen.team_name,
-                    coach_ids=list(specimen.coach_ids),
-                    coach_names=list(specimen.coach_names),
+                    coach_ids=assigned_entry_coach_ids,
+                    coach_names=assigned_entry_coach_names,
                     score_value=float(tally),
                     rank_in_round=podium_spot,
                     advanced=(not finals_only and specimen.entry_id in qualifiers),
@@ -489,6 +525,7 @@ def _build_ranked_rounds(
             )
 
             score_card = MatchScore(competitor_1_poomsae=float(tally), winner_margin="rank demo")
+            match_number_seed = len(matches_out) + 1
 
             matches_out.append(
                 _match(
@@ -505,11 +542,15 @@ def _build_ranked_rounds(
                     status=pace,
                     start=window_start,
                     end=window_stop,
-                    match_index=len(matches_out) + 1,
+                    match_index=match_number_seed,
                     required_referee_count=crew_need,
                     match_id_override=duel_label,
                     participant_ids=list(specimen.athlete_member_ids),
-                    match_number=len(matches_out) + 1,
+                    match_number=_resolve_match_number(
+                        match_number_by_match_id,
+                        duel_label,
+                        match_number_seed,
+                    ),
                     assigned_referee_ids=list(scheduled_segment.assigned_referee_ids),
                 )
             )
@@ -863,22 +904,14 @@ def _build_coach_sheet(
 
     current_tick: int,
 ) -> list[CoachToReport]:
-    teammate_directory = {
-
-        card.competitor_id: card
-
-        for card in competitor_cards
-
-    }
+    teammate_directory = {card.competitor_id: card for card in competitor_cards}
+    coach_by_id = {coach.id: coach for coach in arena.coaches}
 
     urgency = {"done": 0, "waiting": 1, "in_holding": 2, "report_now": 3, "currently_coaching": 4}
 
     board: dict[str, CoachToReport] = {}
 
     for duel in duels:
-
-        roster_tokens = athlete_ids_involved(duel)
-
         lead_time = duel.start_minute - current_tick
 
         if duel.status == "in_progress":
@@ -894,42 +927,36 @@ def _build_coach_sheet(
         else:
             urgency_label = "waiting"
 
-        for fighter_id in roster_tokens:
+        for side in (duel.competitor_1, duel.competitor_2):
+            if not side:
+                continue
 
-            teammate = teammate_directory.get(fighter_id)
+            assigned_coach_id = side.assigned_coach_id
+            if not assigned_coach_id and side.coach_ids:
+                assigned_coach_id = sorted(side.coach_ids)[0]
+            if not assigned_coach_id:
+                continue
 
-            athlete_record = next((person for person in arena.athletes if person.id == fighter_id), None)
+            coach_identity = coach_by_id.get(assigned_coach_id)
+            readable = side.assigned_coach_name or (coach_identity.name if coach_identity else assigned_coach_id)
+            teammate = teammate_directory.get(side.competitor_id)
+            tentative = CoachToReport(
+                coach_id=assigned_coach_id,
+                coach_name=readable,
+                team_id=(teammate.team_id if teammate else side.team_id),
+                team_name=(teammate.team_name if teammate else side.team_name),
+                ring_id=schedule_slot.ring_id,
+                ring_name=ring_banner,
+                division_id=division_sheet.id,
+                division_name=division_sheet.name,
+                related_display=side.name,
+                related_entry_id=duel.match_id,
+                status=urgency_label,
+            )
 
-            coach_roll = teammate.coach_ids if teammate else (athlete_record.coach_ids if athlete_record else [])
-
-            teammate_label = teammate.name if teammate else (athlete_record.name if athlete_record else fighter_id)
-
-            for cid_token in sorted(set(coach_roll)):
-
-                coach_identity = next((person for person in arena.coaches if person.id == cid_token), None)
-
-                readable = coach_identity.name if coach_identity else cid_token
-
-                team_label_value = teammate.team_name if teammate else ""
-
-                tentative = CoachToReport(
-                    coach_id=cid_token,
-                    coach_name=readable,
-                    team_id=teammate.team_id if teammate else "",
-                    team_name=team_label_value,
-                    ring_id=schedule_slot.ring_id,
-                    ring_name=ring_banner,
-                    division_id=division_sheet.id,
-                    division_name=division_sheet.name,
-                    related_display=teammate_label,
-                    related_entry_id=duel.match_id,
-                    status=urgency_label,
-                )
-
-                incumbent = board.get(cid_token)
-
-                if incumbent is None or urgency[urgency_label] >= urgency[incumbent.status]:
-                    board[cid_token] = tentative
+            incumbent = board.get(assigned_coach_id)
+            if incumbent is None or urgency[urgency_label] >= urgency[incumbent.status]:
+                board[assigned_coach_id] = tentative
 
     if current_tick >= schedule_slot.end_minute:
 
@@ -956,6 +983,19 @@ def audit_division_graph(
     errors: list[str] = []
     warnings: list[str] = []
 
+    for bout in matches:
+        for side_name, side in (("competitor_1", bout.competitor_1), ("competitor_2", bout.competitor_2)):
+            if not side:
+                continue
+            if side.coach_ids and not side.assigned_coach_id:
+                errors.append(
+                    f"Match '{bout.match_id}' {side_name} has coach options but no assigned_coach_id."
+                )
+            if side.assigned_coach_id and side.coach_ids and side.assigned_coach_id not in side.coach_ids:
+                errors.append(
+                    f"Match '{bout.match_id}' {side_name} assigned coach '{side.assigned_coach_id}' not in available coach_ids."
+                )
+
     if division.event_type == "kyorugi":
         cohort = len(division.athlete_ids)
         padded_bracket_size = bracket_power_of_two(cohort)
@@ -966,7 +1006,7 @@ def audit_division_graph(
                 f"Kyorugi match rows ({len(matches)}) should equal padded bracket minus one ({expected_bouts_total})."
             )
 
-        head_to_head = [bout for bout in matches if bout.competitor_2]
+        head_to_head = [bout for bout in matches if not bout.bye]
 
         need_non_bye_max = max(0, cohort - 1)
 
@@ -979,6 +1019,32 @@ def audit_division_graph(
 
         if padded_bracket_size >= 4 and len(semis_only) != 2:
             errors.append("Semifinals must expose exactly two bouts unless bracket is finals-only sizing.")
+
+        by_number = {bout.match_number: bout for bout in matches}
+        for bout in matches:
+            for feeder_num, side_comp, side_label in (
+                (bout.feeder_1_match_number, bout.competitor_1, bout.source_1_label),
+                (bout.feeder_2_match_number, bout.competitor_2, bout.source_2_label),
+            ):
+                if feeder_num is None:
+                    continue
+                feeder = by_number.get(feeder_num)
+                feeder_completed = bool(feeder and feeder.status == "completed" and feeder.winner_id)
+                if not feeder_completed and side_comp is not None:
+                    errors.append(
+                        f"Future bracket slot in '{bout.match_id}' prefilled before feeder Match {feeder_num} completes."
+                    )
+                if not feeder_completed and side_label != f"Winner of Match {feeder_num}":
+                    errors.append(
+                        f"Future bracket slot in '{bout.match_id}' must show 'Winner of Match {feeder_num}'."
+                    )
+
+        finals = [bout for bout in matches if bout.round_name == "final"]
+        if finals:
+            final_bout = finals[-1]
+            semis_done = all(sem.status == "completed" and sem.winner_id for sem in semis_only)
+            if not semis_done and (final_bout.competitor_1 or final_bout.competitor_2):
+                errors.append("Final should not prefill athletes before both semifinals are completed.")
 
         order_labels = _round_labels_kyorugi(cohort)
         precedence = {label: index for index, label in enumerate(order_labels)}
@@ -1033,7 +1099,7 @@ def audit_division_graph(
                         f"'{entry.entry_id}' bundled {len(entry.athlete_member_ids)} roster ids."
                     )
 
-        expected_wave = rounds_for_ranked_entries(len(entries_manifest))
+        expected_wave = list(division.poomsae_rounds or rounds_for_ranked_entries(len(entries_manifest)))
 
         actual_wave = [panel.round_name for panel in ranked_blocks]
 
@@ -1064,6 +1130,27 @@ def audit_division_graph(
                         errors.append(f"Athlete '{athlete_piece.competitor_id}' references unknown coach '{mentor}'.")
 
     return DivisionDetailValidation(errors=errors, warnings=warnings, valid=len(errors) == 0)
+
+
+def _competitor_with_assigned_coach(competitor: MatchCompetitor | None, *, match_id: str) -> MatchCompetitor | None:
+    if not competitor:
+        return None
+    if competitor.assigned_coach_id:
+        return competitor
+    if not competitor.coach_ids:
+        return competitor
+
+    ordered = sorted(zip(competitor.coach_ids, competitor.coach_names or []), key=lambda row: row[0])
+    if len(ordered) < len(competitor.coach_ids):
+        known = {cid: name for cid, name in ordered}
+        for cid in sorted(competitor.coach_ids):
+            if cid not in known:
+                ordered.append((cid, cid))
+
+    token = f"{match_id}:{competitor.competitor_id}"
+    pick = sum(ord(ch) for ch in token) % len(ordered)
+    assigned_id, assigned_name = ordered[pick]
+    return competitor.model_copy(update={"assigned_coach_id": assigned_id, "assigned_coach_name": assigned_name})
 
 
 def _match(
@@ -1118,6 +1205,16 @@ def _match(
         feeder_2_match_number=feeder_2_match_number,
         assigned_referee_ids=list(assigned_referee_ids or []),
     )
+
+
+def _resolve_match_number(
+    match_number_by_match_id: dict[str, int] | None,
+    match_id: str,
+    fallback_number: int,
+) -> int:
+    if not match_number_by_match_id:
+        return fallback_number
+    return match_number_by_match_id.get(match_id, fallback_number)
 
 
 def bracket_power_of_two(cohort_total: int) -> int:
@@ -1193,5 +1290,3 @@ def _kyorugi_score(
         competitor_2_points=base if winner.competitor_id == competitor_2.competitor_id else losing,
         winner_margin=f"{abs(base - losing)} point margin",
     )
-
-

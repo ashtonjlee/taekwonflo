@@ -126,6 +126,15 @@ function DemoExplanation({ result }) {
         <ExplanationCard label="Why validation passes" text={validationText} />
       </div>
 
+      {result.metrics ? (
+        <div className="mt-3 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
+          <DemoMetric label="Changed matches" value={result.metrics.changedMatchCount} />
+          <DemoMetric label="Average delay" value={`${result.metrics.averageDelayMinutes} min`} />
+          <DemoMetric label="Max delay" value={`${result.metrics.maxDelayMinutes} min`} />
+          <DemoMetric label="Queue repair" value={result.metrics.queueRepairApplied ? 'yes' : 'no'} />
+        </div>
+      ) : null}
+
       {result.emptyState ? (
         <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
           {result.emptyState}

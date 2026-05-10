@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from .brackets import build_division_detail
+from .match_numbers import build_published_match_number_map
 from .models import (
     CoordinationBoard,
     CoordinatorMatchRow,
@@ -19,13 +20,27 @@ from .models import (
 
 def assign_referees_to_schedule(tournament: Tournament, schedule: list[RingSchedule]) -> list[RingSchedule]:
     """Greedy per-event referee pick: prefer home crew, fill required_referee_count, borrow minimally."""
+    return assign_referees_to_schedule_with_unavailability(tournament, schedule)
+
+
+def assign_referees_to_schedule_with_unavailability(
+    tournament: Tournament,
+    schedule: list[RingSchedule],
+    *,
+    unavailable_by_referee: dict[str, list[tuple[int, int]]] | None = None,
+) -> list[RingSchedule]:
+    """Greedy per-event referee pick with optional temporary referee blackouts."""
     referees = list(tournament.referees)
     crew_bundle = {crew.id: list(crew.referee_ids) for crew in tournament.referee_crews}
     referee_models = {r.referee_id: r for r in referees}
+    unavailable_windows = unavailable_by_referee or {}
 
     intervals: dict[str, list[tuple[int, int]]] = defaultdict(list)
 
     def free_for(referee_id: str, start: int, end: int) -> bool:
+        for s, e in unavailable_windows.get(referee_id, []):
+            if not (end <= s or start >= e):
+                return False
         for s, e in intervals[referee_id]:
             if not (end <= s or start >= e):
                 return False
@@ -120,47 +135,94 @@ def diff_referee_assignments(
             continue
         old_ids = set(old_evt.assigned_referee_ids)
         new_ids = set(new_evt.assigned_referee_ids)
-        if old_ids == new_ids:
-            continue
+        unchanged_ids = old_ids.intersection(new_ids)
 
         def crew_name(cid: str) -> str:
             block = crew_by_id.get(cid)
             return block.name if block else cid
 
-        touched = sorted(old_ids.union(new_ids))
-
-        for rid in touched:
+        # Individual add/remove rows (bench -> slot or slot -> bench).
+        for rid in sorted(old_ids.union(new_ids)):
             was = rid in old_ids
-            now_here = rid in new_ids
-            if was == now_here:
+            now = rid in new_ids
+            if was and now:
                 continue
 
             ref = referees_by_id.get(rid)
             if not ref:
                 continue
 
-            borrowed = ref.home_crew_id != new_evt.referee_crew_id if now_here else ref.home_crew_id != old_evt.referee_crew_id
+            borrowed = ref.home_crew_id != (new_evt.referee_crew_id if now else old_evt.referee_crew_id)
             rows.append(
                 RefereeAdjustment(
                     referee_id=rid,
                     referee_name=ref.name,
                     home_crew_id=ref.home_crew_id,
-                    from_crew_id=old_evt.referee_crew_id,
-                    from_crew_name=crew_name(old_evt.referee_crew_id),
-                    to_crew_id=new_evt.referee_crew_id,
-                    to_crew_name=crew_name(new_evt.referee_crew_id),
-                    ring_id=new_evt.ring_id,
-                    ring_name=new_evt.ring_name,
+                    from_crew_id=old_evt.referee_crew_id if was else "",
+                    from_crew_name=crew_name(old_evt.referee_crew_id) if was else "",
+                    to_crew_id=new_evt.referee_crew_id if now else "",
+                    to_crew_name=crew_name(new_evt.referee_crew_id) if now else "",
+                    from_ring_id=old_evt.ring_id if was else "",
+                    from_ring_name=old_evt.ring_name if was else "",
+                    to_ring_id=new_evt.ring_id if now else "",
+                    to_ring_name=new_evt.ring_name if now else "",
+                    ring_id=new_evt.ring_id if now else old_evt.ring_id,
+                    ring_name=new_evt.ring_name if now else old_evt.ring_name,
+                    from_window_start_minute=old_evt.start_minute if was else None,
+                    from_window_end_minute=old_evt.end_minute if was else None,
                     window_start_minute=new_evt.start_minute,
                     window_end_minute=new_evt.end_minute,
                     scope="temporary" if borrowed else "rest_of_day",
-                    reason=reason + (" — added to slot" if now_here else " — released from slot"),
+                    reason=reason + (" — added to slot" if now else " — released from slot"),
                 )
             )
 
-    dedup_keys: dict[tuple[str, str, str], RefereeAdjustment] = {}
+        # If the same officials stayed assigned but the slot moved (ring/time/crew), emit relocation rows.
+        moved_slot = (
+            old_evt.ring_id != new_evt.ring_id
+            or old_evt.referee_crew_id != new_evt.referee_crew_id
+            or old_evt.start_minute != new_evt.start_minute
+            or old_evt.end_minute != new_evt.end_minute
+        )
+        if moved_slot:
+            for rid in sorted(unchanged_ids):
+                ref = referees_by_id.get(rid)
+                if not ref:
+                    continue
+                rows.append(
+                    RefereeAdjustment(
+                        referee_id=rid,
+                        referee_name=ref.name,
+                        home_crew_id=ref.home_crew_id,
+                        from_crew_id=old_evt.referee_crew_id,
+                        from_crew_name=crew_name(old_evt.referee_crew_id),
+                        to_crew_id=new_evt.referee_crew_id,
+                        to_crew_name=crew_name(new_evt.referee_crew_id),
+                        from_ring_id=old_evt.ring_id,
+                        from_ring_name=old_evt.ring_name,
+                        to_ring_id=new_evt.ring_id,
+                        to_ring_name=new_evt.ring_name,
+                        ring_id=new_evt.ring_id,
+                        ring_name=new_evt.ring_name,
+                        from_window_start_minute=old_evt.start_minute,
+                        from_window_end_minute=old_evt.end_minute,
+                        window_start_minute=new_evt.start_minute,
+                        window_end_minute=new_evt.end_minute,
+                        scope="temporary",
+                        reason=reason + " — slot moved",
+                    )
+                )
+
+    dedup_keys: dict[tuple[str, str, str, int | None, int | None], RefereeAdjustment] = {}
     for row in rows:
-        dedup_keys[(row.referee_id, row.to_crew_id, row.ring_id)] = row
+        if (
+            row.from_crew_id == row.to_crew_id
+            and row.from_ring_id == row.to_ring_id
+            and row.from_window_start_minute == row.window_start_minute
+            and row.from_window_end_minute == row.window_end_minute
+        ):
+            continue
+        dedup_keys[(row.referee_id, row.to_crew_id, row.ring_id, row.window_start_minute, row.window_end_minute)] = row
     return sorted(dedup_keys.values(), key=lambda r: (r.ring_id, r.window_start_minute or 0, r.referee_id))
 
 
@@ -176,6 +238,8 @@ def enrich_schedule_changes(
     next_by_evt = _event_by_id(next_schedule)
     coach_bundle = {c.id: c for c in tournament.coaches}
     athlete_bundle = {a.id: a for a in tournament.athletes}
+
+    published_match_numbers = build_published_match_number_map(tournament, prior_schedule)
 
     details: list[ScheduleChangeDetail] = []
     for row in sorted(changed_events, key=lambda r: getattr(r, "event_id")):
@@ -205,13 +269,41 @@ def enrich_schedule_changes(
 
         athlete_labels = [_athlete_pick(aid, athlete_bundle) for aid in new_evt.athlete_ids][:12]
 
-        coaches = sorted({coach_bundle[c].name for c in new_evt.required_coach_ids if c in coach_bundle})
+        division_matches = _division_matches_snapshot(
+            tournament,
+            next_schedule,
+            new_evt.division_id,
+            new_evt.start_minute,
+            match_number_by_match_id=published_match_numbers,
+        )
+        coaches = sorted(
+            {
+                side.assigned_coach_name
+                or (coach_bundle[side.assigned_coach_id].name if side.assigned_coach_id in coach_bundle else side.assigned_coach_id)
+                for duel in division_matches
+                if duel.scheduled_event_id == new_evt.event_id
+                for side in (duel.competitor_1, duel.competitor_2)
+                if side and side.assigned_coach_id
+            }
+        )
 
-        match_lines = _summarize_matches(tournament, next_schedule, new_evt.division_id, new_evt.start_minute)
+        match_lines = _summarize_matches(
+            tournament,
+            next_schedule,
+            new_evt.division_id,
+            new_evt.start_minute,
+            match_number_by_match_id=published_match_numbers,
+        )
         affected_nums = sorted(
             {
                 duel.match_number
-                for duel in _division_matches_snapshot(tournament, next_schedule, new_evt.division_id, new_evt.start_minute)
+                for duel in _division_matches_snapshot(
+                    tournament,
+                    next_schedule,
+                    new_evt.division_id,
+                    new_evt.start_minute,
+                    match_number_by_match_id=published_match_numbers,
+                )
                 if duel.scheduled_event_id == new_evt.event_id
             }
         )
@@ -226,18 +318,40 @@ def enrich_schedule_changes(
 
 
 def _division_matches_snapshot(
-    tournament: Tournament, schedule: list[RingSchedule], division_id: str, current_minute: int
+    tournament: Tournament,
+    schedule: list[RingSchedule],
+    division_id: str,
+    current_minute: int,
+    match_number_by_match_id: dict[str, int] | None = None,
 ) -> list:
     try:
-        detail = build_division_detail(tournament, schedule, division_id, current_minute=current_minute)
+        detail = build_division_detail(
+            tournament,
+            schedule,
+            division_id,
+            current_minute=current_minute,
+            match_number_by_match_id=match_number_by_match_id,
+        )
     except (KeyError, ValueError):
         return []
     return list(detail.bracket.matches)
 
 
-def _summarize_matches(tournament: Tournament, schedule: list[RingSchedule], division_id: str, current_minute: int) -> list[str]:
+def _summarize_matches(
+    tournament: Tournament,
+    schedule: list[RingSchedule],
+    division_id: str,
+    current_minute: int,
+    match_number_by_match_id: dict[str, int] | None = None,
+) -> list[str]:
     try:
-        detail = build_division_detail(tournament, schedule, division_id, current_minute=current_minute)
+        detail = build_division_detail(
+            tournament,
+            schedule,
+            division_id,
+            current_minute=current_minute,
+            match_number_by_match_id=match_number_by_match_id,
+        )
     except (KeyError, ValueError):
         return []
     lines: list[str] = []
@@ -253,7 +367,18 @@ def _athlete_pick(aid: str, athletes: dict) -> str:
     return row.name if row else aid
 
 
-def build_coordination_board(tournament: Tournament, schedule: list[RingSchedule], current_minute: int) -> CoordinationBoard:
+def build_coordination_board(
+    tournament: Tournament,
+    schedule: list[RingSchedule],
+    current_minute: int,
+    *,
+    published_schedule: list[RingSchedule] | None = None,
+    match_number_by_match_id: dict[str, int] | None = None,
+) -> CoordinationBoard:
+    stable_match_numbers = match_number_by_match_id or build_published_match_number_map(
+        tournament,
+        published_schedule or schedule,
+    )
     detail_cache: dict[str, tuple] = {}
     rows: list[CoordinatorMatchRow] = []
 
@@ -266,6 +391,7 @@ def build_coordination_board(tournament: Tournament, schedule: list[RingSchedule
                         schedule=schedule,
                         division_id=evt.division_id,
                         current_minute=current_minute,
+                        match_number_by_match_id=stable_match_numbers,
                     )
                 except (KeyError, ValueError):
                     detail_cache[evt.division_id] = None
@@ -294,7 +420,8 @@ def build_coordination_board(tournament: Tournament, schedule: list[RingSchedule
 
                 coaches: set[str] = set()
                 for comp in filter(None, [duel.competitor_1, duel.competitor_2]):
-                    coaches.update(comp.coach_names)
+                    if comp.assigned_coach_id:
+                        coaches.add(comp.assigned_coach_name or comp.assigned_coach_id)
 
                 rows.append(
                     CoordinatorMatchRow(
@@ -369,7 +496,13 @@ def summarize_ring_operations(
     schedule: list[RingSchedule],
     changed_event_rows: list,
     current_minute: int,
+    published_schedule: list[RingSchedule] | None = None,
+    match_number_by_match_id: dict[str, int] | None = None,
 ) -> dict:
+    stable_match_numbers = match_number_by_match_id or build_published_match_number_map(
+        tournament,
+        published_schedule or schedule,
+    )
     ring = next((candidate for candidate in schedule if candidate.ring_id == ring_id), None)
     if not ring:
         return _empty_ring_ops()
@@ -412,7 +545,13 @@ def summarize_ring_operations(
 
     def primary_match(div_id: str) -> int | None:
         try:
-            detail_local = build_division_detail(tournament, schedule, div_id, current_minute)
+            detail_local = build_division_detail(
+                tournament,
+                schedule,
+                div_id,
+                current_minute,
+                match_number_by_match_id=stable_match_numbers,
+            )
         except (KeyError, ValueError):
             return None
 
